@@ -13,6 +13,8 @@ const initialState: WorkflowState = {
   status: 'idle',
   eventsConnectionStatus: 'idle',
   jobId: null,
+  submittedAt: null,
+  executingAt: null,
   events: [],
   error: null,
 }
@@ -60,11 +62,14 @@ export function useWorkflow(): UseWorkflowReturn {
     // Clean up any previous run
     cleanupRunning()
 
+    const submittedAt = new Date()
     // Reset state and start running
     setState({
       status: 'pending',
       eventsConnectionStatus: 'waiting',
       jobId: null,
+      submittedAt,
+      executingAt: null,
       events: [],
       error: null,
     })
@@ -78,9 +83,9 @@ export function useWorkflow(): UseWorkflowReturn {
         jobId,
       }))
 
-      const terminalSuccess = new Set(['success', 'complete'])
+      const terminalSuccess = new Set(['success', 'complete', 'succeeded'])
       const terminalError = new Set(['error', 'failed'])
-      const nonTerminal = new Set(['scheduled', 'pending', 'running'])
+      const nonTerminal = new Set(['scheduled', 'pending', 'running', 'executing'])
 
       const pollOnce = async () => {
         try {
@@ -88,10 +93,14 @@ export function useWorkflow(): UseWorkflowReturn {
           const status = String(job.status || '').toLowerCase()
 
           // Always reflect the raw job status from IVCAP (this is the only status we show)
-          setState(prev => ({
-            ...prev,
-            status: (status || 'pending') as WorkflowState['status'],
-          }))
+          setState(prev => {
+            const shouldSetExecutingAt = status === 'executing' && prev.executingAt == null
+            return {
+              ...prev,
+              status: (status || 'pending') as WorkflowState['status'],
+              executingAt: shouldSetExecutingAt ? new Date() : prev.executingAt,
+            }
+          })
 
           if (terminalSuccess.has(status)) {
             cleanupRunning()
@@ -106,7 +115,11 @@ export function useWorkflow(): UseWorkflowReturn {
               status: status as WorkflowState['status'],
               error: job.errorMessage || `Job ${status}`,
             }))
-          } else if (nonTerminal.has(status) && status === 'running' && !hasConnectedEventsRef.current) {
+          } else if (
+            nonTerminal.has(status)
+            && (status === 'running' || status === 'executing')
+            && !hasConnectedEventsRef.current
+          ) {
             // Fetch events best-effort (UX). Only try once, and only after job is running.
             hasConnectedEventsRef.current = true
             setState(prev => ({
@@ -161,6 +174,6 @@ export function useWorkflow(): UseWorkflowReturn {
     state,
     startWorkflow,
     reset,
-    isRunning: state.status !== 'idle' && state.status !== 'success' && state.status !== 'complete' && state.status !== 'error' && state.status !== 'failed',
+    isRunning: state.status !== 'idle' && state.status !== 'success' && state.status !== 'complete' && state.status !== 'succeeded' && state.status !== 'error' && state.status !== 'failed',
   }
 }

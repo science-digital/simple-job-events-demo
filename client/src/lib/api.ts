@@ -111,56 +111,125 @@ export function subscribeToJobEvents(
 ): () => void {
   const eventsUrl = `${API_URL}/1/services2/${encodeURIComponent(SERVICE_URN)}/jobs/${encodeURIComponent(jobId)}/events`
   const abortController = new AbortController()
+  let lastSeqId: string | null = null
+  let hasConnected = false
+  const maxMessages = 100
+  const maxWaitSeconds = 25
   
   console.log('[DEBUG] Fetching events from:', eventsUrl)
-  
-  fetch(eventsUrl, {
-    headers: {
-      ...(AUTH_TOKEN && { 'Authorization': `Bearer ${AUTH_TOKEN}` }),
-    },
-    signal: abortController.signal,
-  })
-    .then(async (response) => {
+
+  const markConnected = () => {
+    if (!hasConnected) {
+      hasConnected = true
+      onComplete()
+    }
+  }
+
+  const parseEventPayload = (payload: unknown, fallback?: Record<string, unknown>): JobEvent | null => {
+    if (payload == null) return null
+
+    let data = payload
+    if (typeof data === 'string') {
+      const trimmed = data.trim()
+      if (!trimmed) return null
+      try {
+        data = JSON.parse(trimmed)
+      } catch {
+        return {
+          step_id: 'unknown',
+          message: trimmed,
+          finished: false,
+          timestamp: new Date(),
+          type: getEventType(''),
+        }
+      }
+    }
+
+    const record = data as Record<string, unknown>
+    const stepId = (record.step_id as string)
+      || (record.stepId as string)
+      || (record['step-id'] as string)
+      || (record.eventID as string)
+      || (fallback?.eventID as string)
+      || 'unknown'
+
+    return {
+      step_id: stepId,
+      message: (record.message as string) || (record.msg as string) || '',
+      finished: (record.finished as boolean) ?? false,
+      timestamp: new Date((record.timestamp as string) || (fallback?.timestamp as string) || Date.now()),
+      type: getEventType(stepId),
+    }
+  }
+
+  const emitFromResponse = (raw: unknown) => {
+    if (raw == null) return
+
+    const items = Array.isArray(raw)
+      ? raw
+      : (raw as Record<string, unknown>).events || (raw as Record<string, unknown>).items || [raw]
+
+    for (const entry of items as Array<Record<string, unknown>>) {
+      const seqId = (entry.SeqID as string) || (entry.seqId as string) || null
+      if (seqId) lastSeqId = seqId
+
+      const payload = (entry as Record<string, unknown>).data ?? entry
+      const parsed = parseEventPayload(payload, entry)
+      if (parsed) {
+        onEvent(parsed)
+      }
+    }
+  }
+
+  const poll = async () => {
+    while (!abortController.signal.aborted) {
+      const url = new URL(eventsUrl)
+      url.searchParams.set('max-messages', String(maxMessages))
+      url.searchParams.set('max-wait-time', String(maxWaitSeconds))
+
+      const headers: Record<string, string> = {}
+      if (AUTH_TOKEN) headers.Authorization = `Bearer ${AUTH_TOKEN}`
+      if (lastSeqId) headers['Last-Event-Id'] = lastSeqId
+
+      const response = await fetch(url.toString(), {
+        headers,
+        signal: abortController.signal,
+      })
+
       console.log('[DEBUG] Events response status:', response.status)
-      console.log('[DEBUG] Events response headers:', Object.fromEntries(response.headers.entries()))
-      
-      const text = await response.text()
-      console.log('[DEBUG] Events response body:', text)
-      
-      if (!response.ok) {
+
+      if (response.status === 204) {
+        markConnected()
+        continue
+      }
+
+      if (!response.ok && response.status !== 101) {
+        const text = await response.text()
         throw new Error(`Events request failed: ${response.status} - ${text}`)
       }
-      
-      // Try to parse as JSON (could be array of events or single object)
+
+      markConnected()
+
+      const text = await response.text()
+      if (!text.trim()) {
+        continue
+      }
+
       try {
-        const data = JSON.parse(text)
-        console.log('[DEBUG] Parsed events data:', data)
-        
-        // Handle array of events
-        const events = Array.isArray(data) ? data : (data.events || data.items || [data])
-        
-        for (const item of events) {
-          const jobEvent: JobEvent = {
-            step_id: item.step_id || item.stepId || item['step-id'] || 'unknown',
-            message: item.message || item.msg || '',
-            finished: item.finished ?? false,
-            timestamp: new Date(item.timestamp || Date.now()),
-            type: getEventType(item.step_id || item.stepId || item['step-id'] || ''),
-          }
-          onEvent(jobEvent)
-        }
-      } catch (parseErr) {
-        console.log('[DEBUG] Response is not JSON, raw text:', text)
+        emitFromResponse(JSON.parse(text))
+      } catch {
+        emitFromResponse(text)
       }
-      
-      onComplete()
-    })
-    .catch((err) => {
-      if (err.name !== 'AbortError') {
-        console.error('[DEBUG] Events fetch error:', err)
-        onError(err instanceof Error ? err : new Error(String(err)))
-      }
-    })
+    }
+  }
+
+  void poll().catch((err) => {
+    const error = err instanceof Error ? err : new Error(String(err))
+    if (error.name !== 'AbortError') {
+      console.error('[DEBUG] Events fetch error:', error)
+      onError(error)
+    }
+  })
   
   // Return cleanup function
   return () => {

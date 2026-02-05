@@ -15,6 +15,9 @@ const PRESETS: { id: PresetName; label: string; description: string }[] = [
 function App() {
   const [selectedPreset, setSelectedPreset] = useState<PresetName>('simple_pipeline')
   const { state, startWorkflow, reset, isRunning } = useWorkflow()
+  const submitToExecuteSeconds = (state.submittedAt && state.executingAt)
+    ? Math.max(0, (state.executingAt.getTime() - state.submittedAt.getTime()) / 1000)
+    : null
 
   const handleStart = () => {
     startWorkflow(selectedPreset, 0.5) // Use 0.5x timing for faster demo
@@ -85,8 +88,8 @@ function App() {
               <div className="flex items-center gap-2 text-sm">
                 <span className="font-medium">Status:</span>
                 <Badge variant={
-                  state.status === 'running' ? 'default' :
-                  (state.status === 'success' || state.status === 'complete') ? 'secondary' :
+                  (state.status === 'running' || state.status === 'executing') ? 'default' :
+                  (state.status === 'success' || state.status === 'complete' || state.status === 'succeeded') ? 'success' :
                   'destructive'
                 }>
                   {state.status.toUpperCase()}
@@ -99,6 +102,11 @@ function App() {
                 {state.jobId && (
                   <span className="text-muted-foreground text-xs">
                     Job: {state.jobId}
+                  </span>
+                )}
+                {submitToExecuteSeconds != null && (
+                  <span className="text-muted-foreground text-xs">
+                    Submit-&gt;Execute: {submitToExecuteSeconds.toFixed(2)}s
                   </span>
                 )}
               </div>
@@ -125,7 +133,7 @@ function App() {
         </Card>
 
         {/* Completion Summary */}
-        {(state.status === 'success' || state.status === 'complete') && (
+        {(state.status === 'success' || state.status === 'complete' || state.status === 'succeeded') && (
           <Card>
             <CardHeader>
               <CardTitle>Workflow Complete</CardTitle>

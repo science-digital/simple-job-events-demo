@@ -25,7 +25,7 @@ export interface JobEvent {
 }
 
 /** Status values from IVCAP job-read endpoint */
-export type JobStatus = 'scheduled' | 'pending' | 'running' | 'success' | 'complete' | 'error' | 'failed'
+export type JobStatus = 'scheduled' | 'pending' | 'running' | 'executing' | 'success' | 'complete' | 'succeeded' | 'error' | 'failed'
 
 /** Workflow status in the UI is exclusively the IVCAP job status (plus idle) */
 export type WorkflowStatus = 'idle' | JobStatus
@@ -38,6 +38,10 @@ export interface WorkflowState {
   /** Status of connecting/fetching job-events (best-effort) */
   eventsConnectionStatus?: EventsConnectionStatus | null
   jobId: string | null
+  /** Local timestamp when the job was submitted */
+  submittedAt: Date | null
+  /** Local timestamp when job first entered executing */
+  executingAt: Date | null
   events: JobEvent[]
   error: string | null
 }
