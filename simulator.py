@@ -9,11 +9,10 @@ import json
 import random
 import time
 from pathlib import Path
-from typing import Optional
 from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
-from ivcap_service import JobContext
+from ivcap_service import JobContext, getLogger
 
 
 class AgentConfig(BaseModel):
@@ -66,7 +65,12 @@ class WorkflowSimulator:
     
     PRESETS_DIR = Path(__file__).parent / "presets"
     
-    def __init__(self, job_context: JobContext, timing_multiplier: float = 1.0):
+    def __init__(
+        self,
+        job_context: JobContext,
+        timing_multiplier: float = 1.0,
+        logger=None,
+    ):
         """
         Initialize the simulator.
         
@@ -78,6 +82,7 @@ class WorkflowSimulator:
         self.timing_multiplier = timing_multiplier
         self._event_count = 0
         self._agents_executed = 0
+        self.logger = logger or getLogger("simulator")
     
     def load_preset(self, preset_name: str) -> WorkflowPreset:
         """
@@ -121,6 +126,13 @@ class WorkflowSimulator:
     def _emit_event(self, step_id: str, message: str, finished: bool = False) -> None:
         """Emit an IVCAP event."""
         self._event_count += 1
+        action = "step_finished" if finished else "step_started"
+        self.logger.info(
+            "Emitting %s for %s: %s",
+            action,
+            step_id,
+            message,
+        )
         if finished:
             self.job_context.report.step_finished(step_id, message)
         else:

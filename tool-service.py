@@ -96,7 +96,8 @@ def run_workflow_simulation(req: Request, jobCtxt: JobContext) -> Result:
     # Create simulator with the job context
     simulator = WorkflowSimulator(
         job_context=jobCtxt,
-        timing_multiplier=req.timing_multiplier or 1.0
+        timing_multiplier=req.timing_multiplier or 1.0,
+        logger=logger,
     )
 
     # Run the simulation
