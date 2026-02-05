@@ -16,7 +16,7 @@ dependencies = [
 
 [tool.poetry-plugin-ivcap]
 service-file = "tool-service.py"
-# service-id = "urn:ivcap:service:227e9443-3de1-5d62-91e5-12a375afb002"
+service-id = "urn:ivcap:service:f82da254-5025-5d94-9186-e76fa45bb7cc"
 service-type = "lambda"
 # policy = "urn:ivcap:policy:ivcap.open.metadata"
 port = 8078
