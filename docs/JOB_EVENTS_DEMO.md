@@ -26,6 +26,7 @@ This project simulates multi-agent workflows (like CrewAI or ChatGPT Deep Resear
 ## Event Structure
 
 Events are emitted hierarchically:
+
 - `workflow:{name}` - Overall workflow start/complete
 - `phase:{phase_id}` - Phase start/complete (e.g., `phase:research`)
 - `agent:{phase_id}:{agent_id}` - Agent start/complete (e.g., `agent:research:web_searcher`)
@@ -126,6 +127,12 @@ The UI is configured via Vite env vars:
 - `VITE_API_URL`: IVCAP base URL (defaults to `https://develop.ivcap.net`)
 - `VITE_SERVICE_URN`: Workflow Simulator service URN (defaults to a demo URN in code)
 - `VITE_AUTH_TOKEN`: Bearer token (optional in code, but typically required for non-public IVCAP endpoints)
+
+### Run the client locally to see the events:
+
+```
+poetry ivcap job-exec tests/request.json -- --stream --raw-events
+```
 
 ### Note about local runs
 
