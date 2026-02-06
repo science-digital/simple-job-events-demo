@@ -10,9 +10,12 @@ import random
 import time
 from pathlib import Path
 from dataclasses import dataclass
+from contextlib import contextmanager
+from typing import Callable, Iterator
 
 from pydantic import BaseModel, Field
-from ivcap_service import JobContext, getLogger
+from ivcap_ai_tool.executor import JobContext
+from ivcap_service import getLogger
 
 
 class AgentConfig(BaseModel):
@@ -120,56 +123,159 @@ class WorkflowSimulator:
         min_ms, max_ms = delay_range_ms
         delay_ms = random.randint(min_ms, max_ms)
         time.sleep(delay_ms / 1000.0)
+
+    def _annotate_message(self, message: str, emit_path: str) -> str:
+        """Attach emitter info to messages for visibility."""
+        marker = " [emit="
+        if marker in message:
+            return message
+        return f"{message}{marker}{emit_path}]"
     
-    def _emit_event(self, step_id: str, message: str, finished: bool = False) -> None:
-        """Emit an IVCAP event."""
+    @contextmanager
+    def _report_step(
+        self,
+        step_id: str,
+        start_message: str,
+    ) -> Iterator[Callable[[str], None]]:
+        """Emit a start/finish step event with compatibility fallbacks."""
+        reporter = self.job_context.report
+        start_emit_path = "noop"
+        if reporter is not None and hasattr(reporter, "step"):
+            start_emit_path = "report.step"
+        elif reporter is not None and hasattr(reporter, "step_started"):
+            start_emit_path = "step_started"
+
+        start_message = self._annotate_message(start_message, start_emit_path)
         self._event_count += 1
-        action = "step_finished" if finished else "step_started"
         self.logger.info(
-            "Emitting %s for %s: %s",
-            action,
+            "Emitting step_started via %s for %s: %s",
+            start_emit_path,
+            step_id,
+            start_message,
+        )
+
+        finished = False
+        step = None
+
+        def finish(message: str) -> None:
+            nonlocal finished
+            if finished:
+                return
+            finished = True
+            finish_emit_path = "noop"
+            if step is not None and hasattr(step, "finished"):
+                finish_emit_path = "report.step"
+            elif reporter is not None and hasattr(reporter, "step_finished"):
+                finish_emit_path = "step_finished"
+
+            message = self._annotate_message(message, finish_emit_path)
+            self._event_count += 1
+            self.logger.info(
+                "Emitting step_finished via %s for %s: %s",
+                finish_emit_path,
+                step_id,
+                message,
+            )
+            if reporter is None:
+                return
+            if step is not None and hasattr(step, "finished"):
+                step.finished(message)
+            elif hasattr(reporter, "step_finished"):
+                reporter.step_finished(
+                    step_id,
+                    raw_event={
+                        "message": message,
+                        "emit": finish_emit_path,
+                    },
+                )
+
+        if reporter is not None and hasattr(reporter, "step"):
+            with reporter.step(step_id, start_message) as step:
+                try:
+                    yield finish
+                finally:
+                    if not finished:
+                        finish(start_message)
+            return
+
+        if reporter is not None and hasattr(reporter, "step_started"):
+            reporter.step_started(
+                step_id,
+                raw_event={
+                    "message": start_message,
+                    "emit": start_emit_path,
+                },
+            )
+
+        try:
+            yield finish
+        finally:
+            if not finished:
+                finish(start_message)
+
+    def _emit_tick(self, step_id: str, message: str) -> None:
+        """Emit a single 'tick' event (start-only)."""
+        reporter = self.job_context.report
+        emit_path = "noop"
+        if reporter is not None and hasattr(reporter, "step_started"):
+            emit_path = "step_started"
+        elif reporter is not None and hasattr(reporter, "step"):
+            emit_path = "report.step"
+
+        message = self._annotate_message(message, emit_path)
+        self._event_count += 1
+        self.logger.info(
+            "Emitting step_started via %s for %s: %s",
+            emit_path,
             step_id,
             message,
         )
-        if finished:
-            self.job_context.report.step_finished(step_id, message)
-        else:
-            self.job_context.report.step_started(step_id, message)
+        if reporter is None:
+            return
+        if hasattr(reporter, "step_started"):
+            reporter.step_started(
+                step_id,
+                raw_event={
+                    "message": message,
+                    "emit": emit_path,
+                },
+            )
+            return
+        if hasattr(reporter, "step"):
+            with reporter.step(step_id, message) as step:
+                pass
     
     def _execute_agent(self, phase_id: str, agent: AgentConfig) -> None:
         """Execute a single agent's tasks within a phase."""
         agent_step_id = f"agent:{phase_id}:{agent.id}"
-        
-        # Agent started
-        self._emit_event(agent_step_id, f"{agent.name} started")
-        
-        # Execute each task
-        for i, task in enumerate(agent.tasks):
+
+        with self._report_step(agent_step_id, f"{agent.name} started") as finish:
+            # Execute each task
+            for i, task in enumerate(agent.tasks):
+                status_step_id = f"{agent_step_id}:task-{i+1}"
+                with self._report_step(status_step_id, task) as finish_task:
+                    self._random_delay(agent.delay_range_ms)
+                    finish_task(task)
+
+            # Agent completed
             self._random_delay(agent.delay_range_ms)
-            status_step_id = f"{agent_step_id}:task-{i+1}"
-            self._emit_event(status_step_id, task)
-            self._emit_event(status_step_id, task, finished=True)
-        
-        # Agent completed
-        self._random_delay(agent.delay_range_ms)
-        self._emit_event(agent_step_id, f"{agent.name} completed", finished=True)
+            finish(f"{agent.name} completed")
         self._agents_executed += 1
     
     def _execute_phase(self, phase: PhaseConfig) -> None:
         """Execute a single workflow phase and all its agents."""
         phase_step_id = f"phase:{phase.id}"
-        
-        # Phase started
-        self._emit_event(phase_step_id, f"{phase.name} started")
-        self._random_delay(phase.delay_range_ms)
-        
-        # Execute all agents in the phase
-        for agent in phase.agents:
-            self._execute_agent(phase.id, agent)
-        
-        # Phase completed
-        self._random_delay(phase.delay_range_ms)
-        self._emit_event(phase_step_id, f"{phase.name} completed", finished=True)
+
+        with self._report_step(phase_step_id, f"{phase.name} started") as finish:
+            self._random_delay(phase.delay_range_ms)
+
+            # Execute all agents in the phase
+            for agent in phase.agents:
+                self._execute_agent(phase.id, agent)
+
+            # Phase completed
+            self._random_delay(phase.delay_range_ms)
+            finish(f"{phase.name} completed")
     
     def run(self, preset_name: str) -> SimulationResult:
         """
@@ -190,19 +296,18 @@ class WorkflowSimulator:
         
         # Emit workflow start
         workflow_step_id = f"workflow:{preset.name}"
-        self._emit_event(workflow_step_id, f"Starting workflow: {preset.description}")
-        
-        # Execute all phases in order
-        for phase in preset.phases:
-            self._execute_phase(phase)
-        
-        # Emit workflow completion
-        elapsed = time.time() - start_time
-        self._emit_event(
+        elapsed = 0.0
+        with self._report_step(
             workflow_step_id,
-            f"Workflow completed in {elapsed:.1f}s",
-            finished=True
-        )
+            f"Starting workflow: {preset.description}",
+        ) as finish:
+            # Execute all phases in order
+            for phase in preset.phases:
+                self._execute_phase(phase)
+
+            # Emit workflow completion
+            elapsed = time.time() - start_time
+            finish(f"Workflow completed in {elapsed:.1f}s")
         
         return SimulationResult(
             preset_name=preset.name,
@@ -232,7 +337,7 @@ class WorkflowSimulator:
         while time.time() < end_time:
             tick_index += 1
             step_id = f"timer:tick:{tick_index}"
-            self._emit_event(step_id, f"Tick {tick_index}")
+            self._emit_tick(step_id, f"Tick {tick_index}")
 
             remaining = end_time - time.time()
             if remaining <= 0:
