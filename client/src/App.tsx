@@ -25,13 +25,8 @@ function App() {
   const submitToExitSeconds = (state.submittedAt && state.finishedAt)
     ? Math.max(0, (state.finishedAt.getTime() - state.submittedAt.getTime()) / 1000)
     : null
-  const firstEventAt = state.events.length > 0
-    ? state.events.reduce((earliest, event) => (
-      event.timestamp < earliest ? event.timestamp : earliest
-    ), state.events[0].timestamp)
-    : null
-  const submitToFirstEventSeconds = (state.submittedAt && firstEventAt)
-    ? Math.max(0, (firstEventAt.getTime() - state.submittedAt.getTime()) / 1000)
+  const submitToFirstEventSeconds = (state.submittedAt && state.firstEventReceivedAt)
+    ? Math.max(0, (state.firstEventReceivedAt.getTime() - state.submittedAt.getTime()) / 1000)
     : null
   const submitToExecuteLabel = submitToExecuteSeconds != null ? `${submitToExecuteSeconds.toFixed(2)}s` : 'Waiting...'
   const submitToFirstEventLabel = submitToFirstEventSeconds != null

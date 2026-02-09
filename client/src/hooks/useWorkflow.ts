@@ -16,6 +16,7 @@ const initialState: WorkflowState = {
   submittedAt: null,
   executingAt: null,
   finishedAt: null,
+  firstEventReceivedAt: null,
   events: [],
   error: null,
 }
@@ -59,6 +60,8 @@ export function useWorkflow(): UseWorkflowReturn {
     setState(prev => ({
       ...prev,
       events: [...prev.events, event],
+      // Record local arrival time of the very first event (same clock as submittedAt)
+      firstEventReceivedAt: prev.firstEventReceivedAt ?? new Date(),
     }))
   }, [])
 
@@ -81,6 +84,7 @@ export function useWorkflow(): UseWorkflowReturn {
       submittedAt,
       executingAt: null,
       finishedAt: null,
+      firstEventReceivedAt: null,
       events: [],
       error: null,
     })
@@ -153,10 +157,12 @@ export function useWorkflow(): UseWorkflowReturn {
                 }))
               },
               () => {
-                // Best-effort: don't fail the workflow if job-events fails
+                // Best-effort: don't fail the workflow if job-events fails.
+                // Don't downgrade from 'connected' → 'error' (e.g. 502 after job pod exits).
                 setState(prev => ({
                   ...prev,
-                  eventsConnectionStatus: 'error',
+                  eventsConnectionStatus:
+                    prev.eventsConnectionStatus === 'connected' ? 'connected' : 'error',
                 }))
               }
             )

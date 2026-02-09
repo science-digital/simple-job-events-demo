@@ -106,12 +106,24 @@ export async function readJob(jobId: string): Promise<JobRead> {
 }
 
 /**
- * Fetch job events from the IVCAP API
- * 
+ * Fetch job events from the IVCAP API via SSE (Server-Sent Events).
+ *
+ * The events endpoint returns `text/event-stream`. Each SSE event carries a
+ * JSON envelope:
+ *
+ *   id:00002014
+ *   data:{"SeqID":"00002014","eventID":"UUID","type":"ivcap.job.event",
+ *         "schema":"urn:ivcap:schema:service.event.step.start.1",
+ *         "timestamp":"ISO-8601",
+ *         "data":{"name":"timer:tick:1","options":{"message":"Tick 1"}}}
+ *
+ * We use `response.body.getReader()` to process events incrementally (rather
+ * than `response.text()` which would block until the stream closes).
+ *
  * @param jobId - The job ID to fetch events for
- * @param onEvent - Callback for each event
- * @param onComplete - Callback when done
- * @param onError - Callback on error
+ * @param onEvent - Callback for each parsed event
+ * @param onComplete - Callback once the first successful response arrives
+ * @param onError - Callback on fatal error
  * @returns Cleanup function to abort the request
  */
 export function subscribeToJobEvents(
@@ -124,10 +136,11 @@ export function subscribeToJobEvents(
   const abortController = new AbortController()
   let lastSeqId: string | null = null
   let hasConnected = false
+  let sawTerminalStatus = false
   const maxMessages = 100
   const maxWaitSeconds = 25
-  
-  console.log('[DEBUG] Fetching events from:', eventsUrl)
+
+  console.log('[events] Subscribing to:', eventsUrl)
 
   const markConnected = () => {
     if (!hasConnected) {
@@ -136,37 +149,77 @@ export function subscribeToJobEvents(
     }
   }
 
-  const parseEventPayload = (payload: unknown, fallback?: Record<string, unknown>): JobEvent | null => {
-    if (payload == null) return null
+  // ---------------------------------------------------------------------------
+  // IVCAP envelope parsing
+  // ---------------------------------------------------------------------------
 
-    let data = payload
-    if (typeof data === 'string') {
-      const trimmed = data.trim()
-      if (!trimmed) return null
-      try {
-        data = JSON.parse(trimmed)
-      } catch {
-        return {
-          step_id: 'unknown',
-          message: trimmed,
-          finished: false,
-          timestamp: new Date(),
-          type: getEventType(''),
-        }
+  /**
+   * Parse an IVCAP event envelope into a UI-friendly JobEvent.
+   *
+   * Envelope types:
+   *  - ivcap.job.event  (step start / finish)
+   *  - ivcap.job.status (job status change)
+   *  - ivcap.job.result (job result available)
+   */
+  const parseIvcapEnvelope = (envelope: Record<string, unknown>): JobEvent | null => {
+    const ivcapType = envelope.type as string | undefined
+    const schema = (envelope.schema as string) || ''
+    const timestamp = new Date((envelope.timestamp as string) || Date.now())
+
+    if (ivcapType === 'ivcap.job.event') {
+      const inner = envelope.data as Record<string, unknown> | null
+      if (!inner) return null
+
+      const stepId = (inner.name as string) || 'unknown'
+      const options = inner.options as Record<string, unknown> | null
+      const message = (options?.message as string) || ''
+      const finished = schema.includes('step.finish')
+
+      return {
+        step_id: stepId,
+        message: message || (finished ? 'completed' : 'started'),
+        finished,
+        timestamp,
+        type: getEventType(stepId),
       }
     }
 
-    const record = data as Record<string, unknown>
+    if (ivcapType === 'ivcap.job.status') {
+      const inner = envelope.data as Record<string, unknown> | null
+      const status = (inner?.status as string) || 'unknown'
+      const terminalStatuses = ['succeeded', 'success', 'complete', 'failed', 'error']
+      if (terminalStatuses.includes(status)) {
+        sawTerminalStatus = true
+      }
+      return {
+        step_id: 'job:status',
+        message: `Job status: ${status}`,
+        finished: true,
+        timestamp,
+        type: 'workflow',
+      }
+    }
+
+    if (ivcapType === 'ivcap.job.result') {
+      const inner = envelope.data as Record<string, unknown> | null
+      return {
+        step_id: 'job:result',
+        message: `Result: ${(inner?.['result-urn'] as string) || 'available'}`,
+        finished: true,
+        timestamp,
+        type: 'workflow',
+      }
+    }
+
+    // Unknown envelope – fall back to flat parsing
+    return parseFlatEvent(envelope)
+  }
+
+  /** Fallback: try to interpret a record without the IVCAP envelope wrapper. */
+  const parseFlatEvent = (record: Record<string, unknown>): JobEvent | null => {
     const stepId = (record.step_id as string)
       || (record.stepId as string)
       || (record['step-id'] as string)
-      || (record.eventID as string)
-      || (record.EventID as string)
-      || (record.SeqID as string)
-      || (record.seqId as string)
-      || (fallback?.eventID as string)
-      || (fallback?.EventID as string)
-      || (fallback?.SeqID as string)
       || 'unknown'
 
     const message = (record.message as string)
@@ -176,107 +229,119 @@ export function subscribeToJobEvents(
     return {
       step_id: stepId,
       message,
-      finished: (record.finished as boolean) ?? (record.Finished as boolean) ?? false,
-      timestamp: new Date(
-        (record.timestamp as string)
-        || (record.Timestamp as string)
-        || (fallback?.timestamp as string)
-        || (fallback?.Timestamp as string)
-        || Date.now()
-      ),
+      finished: (record.finished as boolean) ?? false,
+      timestamp: new Date((record.timestamp as string) || Date.now()),
       type: getEventType(stepId),
     }
   }
 
-  const parseSseText = (text: string): Array<{ id?: string; data?: string }> => {
-    const events: Array<{ id?: string; data?: string }> = []
-    const lines = text.split(/\r?\n/)
-    let currentId: string | undefined
-    let dataLines: string[] = []
+  // ---------------------------------------------------------------------------
+  // SSE stream processing
+  // ---------------------------------------------------------------------------
 
-    const pushEvent = () => {
-      if (currentId || dataLines.length > 0) {
-        events.push({
-          id: currentId,
-          data: dataLines.join('\n'),
-        })
-      }
-      currentId = undefined
-      dataLines = []
+  /** Process a single SSE `data:` payload (a JSON string). */
+  const processDataLine = (jsonStr: string) => {
+    const trimmed = jsonStr.trim()
+    if (!trimmed) return
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>
+      const seqId = parsed.SeqID as string
+      if (seqId) lastSeqId = seqId
+
+      const event = parseIvcapEnvelope(parsed)
+      if (event) onEvent(event)
+    } catch (err) {
+      console.warn('[events] Failed to parse event JSON:', err, trimmed.slice(0, 200))
     }
-
-    for (const line of lines) {
-      if (line === '') {
-        pushEvent()
-        continue
-      }
-      if (line.startsWith(':')) continue
-      if (line.startsWith('id:')) {
-        currentId = line.slice(3).trim()
-        continue
-      }
-      if (line.startsWith('data:')) {
-        dataLines.push(line.slice(5).trimStart())
-      }
-    }
-
-    pushEvent()
-    return events
   }
 
-  const emitFromResponse = (raw: unknown) => {
-    if (raw == null) return
+  /** Parse a single SSE event block (the text between blank-line separators). */
+  const processSseBlock = (block: string) => {
+    if (!block.trim()) return
 
-    if (typeof raw === 'string') {
-      const trimmed = raw.trim()
-      if (!trimmed) return
-      if (trimmed.startsWith('id:') || trimmed.startsWith('data:') || trimmed.includes('\ndata:')) {
-        const parsed = parseSseText(trimmed)
-        for (const entry of parsed) {
-          if (entry.id) lastSeqId = entry.id
-          const payload = entry.data ?? ''
-          const event = parseEventPayload(payload, entry.id ? { SeqID: entry.id } : undefined)
-          if (event) onEvent(event)
-        }
-        return
+    const dataLines: string[] = []
+    for (const line of block.split('\n')) {
+      if (line.startsWith('id:')) {
+        const sseId = line.slice(3).trim()
+        if (sseId) lastSeqId = sseId
+      } else if (line.startsWith('data:')) {
+        dataLines.push(line.slice(5).trimStart())
       }
-      const parsed = parseEventPayload(trimmed)
-      if (parsed) onEvent(parsed)
+      // skip comments (:), event:, retry:, etc.
+    }
+
+    if (dataLines.length > 0) {
+      processDataLine(dataLines.join('\n'))
+    }
+  }
+
+  /**
+   * Read an SSE response body incrementally using the ReadableStream API.
+   * Events are emitted to `onEvent` as soon as each SSE block is complete.
+   */
+  const readSseStream = async (response: Response) => {
+    const reader = response.body?.getReader()
+    if (!reader) {
+      // Fallback: read entire body at once (non-streaming environment)
+      const text = await response.text()
+      for (const block of text.split('\n\n')) {
+        processSseBlock(block)
+      }
       return
     }
 
-    const items = Array.isArray(raw)
-      ? raw
-      : (raw as Record<string, unknown>).events || (raw as Record<string, unknown>).items || [raw]
+    const decoder = new TextDecoder()
+    let buffer = ''
 
-    for (const entry of items as Array<Record<string, unknown>>) {
-      const seqId = (entry.SeqID as string) || (entry.seqId as string) || null
-      if (seqId) lastSeqId = seqId
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
 
-      const payload = (entry as Record<string, unknown>).data ?? entry
-      const parsed = parseEventPayload(payload, entry)
-      if (parsed) {
-        onEvent(parsed)
+        buffer += decoder.decode(value, { stream: true })
+
+        // SSE events are separated by blank lines (\n\n)
+        const parts = buffer.split('\n\n')
+        buffer = parts.pop() || '' // keep the incomplete trailing part
+
+        for (const block of parts) {
+          processSseBlock(block)
+        }
       }
+
+      // Process any remaining data in the buffer
+      if (buffer.trim()) {
+        processSseBlock(buffer)
+      }
+    } finally {
+      reader.releaseLock()
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Long-poll loop
+  // ---------------------------------------------------------------------------
+
   const poll = async () => {
-    while (!abortController.signal.aborted) {
+    while (!abortController.signal.aborted && !sawTerminalStatus) {
       const url = new URL(eventsUrl)
       url.searchParams.set('max-messages', String(maxMessages))
       url.searchParams.set('max-wait-time', String(maxWaitSeconds))
 
-      const headers: Record<string, string> = {}
+      const headers: Record<string, string> = {
+        Accept: 'text/event-stream',
+      }
       if (AUTH_TOKEN) headers.Authorization = `Bearer ${AUTH_TOKEN}`
       if (lastSeqId) headers['Last-Event-ID'] = lastSeqId
+
+      console.log('[events] Fetching:', url.toString(), lastSeqId ? `(after ${lastSeqId})` : '(initial)')
 
       const response = await fetch(url.toString(), {
         headers,
         signal: abortController.signal,
       })
 
-      console.log('[DEBUG] Events response status:', response.status)
+      console.log('[events] Response:', response.status, response.headers.get('content-type'))
 
       if (response.status === 204) {
         markConnected()
@@ -290,15 +355,37 @@ export function subscribeToJobEvents(
 
       markConnected()
 
-      const text = await response.text()
-      if (!text.trim()) {
-        continue
-      }
+      const contentType = response.headers.get('content-type') || ''
 
-      try {
-        emitFromResponse(JSON.parse(text))
-      } catch {
-        emitFromResponse(text)
+      if (contentType.includes('text/event-stream')) {
+        // SSE stream – read incrementally so events appear in real-time
+        await readSseStream(response)
+      } else {
+        // JSON or other – read the whole body and parse
+        const text = await response.text()
+        if (!text.trim()) continue
+
+        try {
+          const json = JSON.parse(text)
+          const items: unknown[] = Array.isArray(json)
+            ? json
+            : ((json as Record<string, unknown>).events as unknown[])
+              || ((json as Record<string, unknown>).items as unknown[])
+              || [json]
+
+          for (const item of items) {
+            const rec = item as Record<string, unknown>
+            const seqId = rec.SeqID as string
+            if (seqId) lastSeqId = seqId
+            const event = parseIvcapEnvelope(rec)
+            if (event) onEvent(event)
+          }
+        } catch {
+          // Last resort: try treating the body as SSE text
+          for (const block of text.split('\n\n')) {
+            processSseBlock(block)
+          }
+        }
       }
     }
   }
@@ -306,11 +393,11 @@ export function subscribeToJobEvents(
   void poll().catch((err) => {
     const error = err instanceof Error ? err : new Error(String(err))
     if (error.name !== 'AbortError') {
-      console.error('[DEBUG] Events fetch error:', error)
+      console.error('[events] Fetch error:', error)
       onError(error)
     }
   })
-  
+
   // Return cleanup function
   return () => {
     abortController.abort()
