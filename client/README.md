@@ -103,8 +103,8 @@ A ChatGPT-style conversational interface for testing chat latency and UX through
 
 1. User types a message (or clicks an example prompt button).
 2. The client creates an IVCAP chat job via `POST /1/services2/{service_urn}/jobs`.
-3. The client polls for job status until the job enters `running`/`executing`.
-4. Once running, the client subscribes to the job's SSE event stream.
+3. The client creates the events subscription immediately after job creation, while status polling continues in parallel.
+4. As soon as events arrive, lifecycle and token timing checkpoints are captured for diagnostics.
 5. Non-token lifecycle events (`chat:request`, `chat:response`) are displayed as status messages in the assistant bubble.
 6. Batched token events (`chat:tokens:*`) are extracted and fed into a **typewriter animation** that reveals text character-by-character (~40 chars/sec), producing a smooth streaming effect even though tokens arrive in batches. Legacy singular `chat:token:*` events are also supported.
 7. On completion, any remaining queued typewriter text is flushed instantly, and timing metrics are displayed.
@@ -115,9 +115,15 @@ A ChatGPT-style conversational interface for testing chat latency and UX through
 - **Chat bubbles** -- User messages right-aligned (primary color), assistant messages left-aligned (muted background).
 - **Thinking indicator** -- Animated bouncing dots with real-time status messages from the backend (e.g., "Submitting chat request to model 'gpt-5-mini'", "Streaming model response").
 - **Typewriter animation** -- Batched tokens are revealed character-by-character (~25 ms/char) for a smooth streaming illusion; remaining text is flushed instantly on completion.
+- **Two-phase token batching** -- Backend emits the first token batch with aggressive thresholds (`100ms` or `3` chunks) to improve first-token UX, then reverts to normal batching (`300ms` or `20` chunks) for throughput.
 - **Streaming cursor** -- Blinking cursor at the end of the assistant text while tokens are arriving.
 - **Example prompts** -- Pre-built prompt buttons on the empty state for one-click testing ("AI Agent Architectures", "RAG vs Fine-tuning", "Quick test").
-- **Timing metrics bar** -- Compact row above the input showing latency deltas: Submit-to-Executing, Submit-to-First-Event, Submit-to-First-Token, Submit-to-Complete.
+- **Timing metrics bar** -- Compact rows above the input showing both high-level and transport metrics:
+  - Submit-to-Executing, Submit-to-First-Event, Submit-to-First-Token, Submit-to-Complete
+  - Submit-to-Job-Created, Job-Created-to-Events-Connected
+  - Event-Envelope-to-Client and Emit-to-Client (JobEvents path)
+- **Bottleneck diagnostics** -- Debug panel highlights model/proxy TTFT, server flush delay, and JobEvents pipeline delay, plus an auto-generated likely bottleneck summary.
+- **AI Diagnostic Log** -- Copy-ready run log (timestamps, metrics, recent events, and likely bottleneck) for sharing with AI tools during diagnosis.
 - **Collapsible debug panel** -- Right-side panel (toggle via "Debug" button) showing job diagnostics (status, job ID, token event count, connection status) and a raw event stream.
 - **Keyboard shortcuts** -- Enter to send, Shift+Enter for newline.
 - **Retry resilience** -- SSE long-poll automatically retries on transient network errors (HTTP/2 resets, timeouts) with exponential backoff up to 5 consecutive failures.
@@ -173,6 +179,16 @@ Manages the full chat lifecycle. Returns:
 | `firstEventAt` | `Date \| null` | When the first SSE event arrived |
 | `firstTokenAt` | `Date \| null` | When the first token was received |
 | `finishedAt` | `Date \| null` | When the job reached a terminal state |
+| `jobCreatedAt` | `Date \| null` | When create-job returned a job ID |
+| `eventsSubscribeStartedAt` | `Date \| null` | When events subscription was initiated |
+| `eventsConnectedAt` | `Date \| null` | When the first successful events response arrived |
+| `firstTokenServerEventAt` | `Date \| null` | Server event timestamp of first token event |
+| `firstTokenServerEmitAt` | `Date \| null` | Backend marker timestamp when first token batch was emitted |
+| `requestDispatchAt` | `Date \| null` | Backend marker timestamp for outbound request dispatch |
+| `upstreamAcceptedAt` | `Date \| null` | Backend marker timestamp when upstream accepted the request |
+| `firstUpstreamDeltaAt` | `Date \| null` | Backend marker timestamp for first streamed upstream delta |
+| `firstBatchEmitAt` | `Date \| null` | Backend marker timestamp when first token batch is emitted |
+| `latencyBreakdown` | `ChatLatencyBreakdown` | Derived latency segments for request, scheduling, model, and JobEvents transport |
 
 ### `useWorkflow`
 
@@ -214,7 +230,11 @@ Browse available components at [ui.shadcn.com](https://ui.shadcn.com/docs/compon
 The client creates and monitors jobs via the IVCAP Jobs API:
 
 - `POST /1/services2/{service_urn}/jobs` -- Create a job (workflow or chat)
-- `GET /1/services2/{service_urn}/jobs/{job_id}` -- Poll job status (every 2s)
+- `GET /1/services2/{service_urn}/jobs/{job_id}` -- Poll job status (currently ~750ms cadence in chat flow)
 - `GET /1/services2/{service_urn}/jobs/{job_id}/events` -- SSE long-poll for job events
 
 > **Auth note:** `VITE_AUTH_TOKEN` is used for client-to-IVCAP Jobs API calls. LiteLLM proxy authentication is handled by the backend via job authorization (deployed) or `IVCAP_JWT` (local runs).
+
+## Latency Metrics Guide
+
+For plain-language definitions of each latency metric (what it includes/excludes, and how to interpret it), see [docs/LATENCY_METRICS.md](../docs/LATENCY_METRICS.md).

@@ -110,8 +110,29 @@ class ChatSimulator:
     # number of events emitted (and therefore the end-to-end latency perceived
     # by the client) while the client-side typewriter animation smooths out the
     # visual presentation.
-    BATCH_FLUSH_INTERVAL_S = 0.3   # flush at most every 300 ms
-    BATCH_FLUSH_MAX_TOKENS = 20    # or when 20 chunks have accumulated
+    # Two-phase batching:
+    # 1) First batch uses aggressive thresholds to improve time-to-first-token UX.
+    # 2) Subsequent batches use larger thresholds to keep event volume efficient.
+    FIRST_BATCH_FLUSH_INTERVAL_S = 0.1  # first batch: flush at most every 100 ms
+    FIRST_BATCH_FLUSH_MAX_TOKENS = 3    # first batch: flush when 3 chunks accumulated
+    BATCH_FLUSH_INTERVAL_S = 0.3         # normal batches: flush at most every 300 ms
+    BATCH_FLUSH_MAX_TOKENS = 20          # normal batches: or when 20 chunks accumulated
+    LATENCY_META_PREFIX = "__latency_meta__:"
+
+    def _emit_latency_marker(self, step_name: str, label: str, **kwargs) -> None:
+        """Emit a lightweight latency marker event with JSON metadata."""
+        if not self.job_context.report:
+            return
+        payload = {
+            "label": label,
+            "server_emit_ts_ms": int(time.time() * 1000),
+            **kwargs,
+        }
+        with self.job_context.report.step(
+            step_name,
+            message=f"{self.LATENCY_META_PREFIX}{json.dumps(payload, separators=(',', ':'))}",
+        ):
+            self._event_count += 2
 
     def run_streaming_chat(
         self,
@@ -130,6 +151,8 @@ class ChatSimulator:
         batch_buffer: list[str] = []
         batch_num = 0
         last_flush = time.monotonic()
+        first_batch_marker_emitted = False
+        first_upstream_delta_emitted = False
 
         # Background thread for non-blocking event writes.  A single worker
         # preserves event ordering while letting the LLM stream loop continue
@@ -139,9 +162,16 @@ class ChatSimulator:
 
         def flush_batch() -> None:
             """Submit a background Job Event write for all buffered token text."""
-            nonlocal batch_num, last_flush
+            nonlocal batch_num, last_flush, first_batch_marker_emitted
             if not batch_buffer:
                 return
+            if not first_batch_marker_emitted:
+                first_batch_marker_emitted = True
+                self._emit_latency_marker(
+                    "chat:latency:first-batch",
+                    "First token batch emitted to Job Events",
+                    batch_num=1,
+                )
             batch_num += 1
             text = "".join(batch_buffer)
             batch_buffer.clear()
@@ -182,6 +212,10 @@ class ChatSimulator:
 
             endpoint = f"{self._proxy_url()}/v1/chat/completions"
             self.logger.info("Submitting streaming chat request to %s", endpoint)
+            self._emit_latency_marker(
+                "chat:latency:request-dispatch",
+                "Outbound request dispatched to LiteLLM proxy",
+            )
 
             with self.job_context.report.step(
                 "chat:request", message=f"Submitting chat request to model '{model}'"
@@ -210,6 +244,10 @@ class ChatSimulator:
 
                         request_step.finished("Chat request accepted by LiteLLM proxy")
                         self._event_count += 1
+                        self._emit_latency_marker(
+                            "chat:latency:upstream-accepted",
+                            "LiteLLM proxy accepted upstream request",
+                        )
 
                         with self.job_context.report.step(
                             "chat:response", message="Streaming model response"
@@ -237,15 +275,29 @@ class ChatSimulator:
                                 if not delta:
                                     continue
 
+                                if not first_upstream_delta_emitted:
+                                    first_upstream_delta_emitted = True
+                                    self._emit_latency_marker(
+                                        "chat:latency:first-upstream-delta",
+                                        "First upstream delta received from model stream",
+                                    )
+
                                 chunks_emitted += 1
                                 approx_tokens_emitted += max(1, len(delta.split()))
                                 response_chunks.append(delta)
 
                                 # Buffer the token and flush when thresholds are met
                                 batch_buffer.append(delta)
+                                if not first_batch_marker_emitted:
+                                    flush_max_tokens = self.FIRST_BATCH_FLUSH_MAX_TOKENS
+                                    flush_interval_s = self.FIRST_BATCH_FLUSH_INTERVAL_S
+                                else:
+                                    flush_max_tokens = self.BATCH_FLUSH_MAX_TOKENS
+                                    flush_interval_s = self.BATCH_FLUSH_INTERVAL_S
+
                                 if (
-                                    len(batch_buffer) >= self.BATCH_FLUSH_MAX_TOKENS
-                                    or time.monotonic() - last_flush >= self.BATCH_FLUSH_INTERVAL_S
+                                    len(batch_buffer) >= flush_max_tokens
+                                    or time.monotonic() - last_flush >= flush_interval_s
                                 ):
                                     flush_batch()
 

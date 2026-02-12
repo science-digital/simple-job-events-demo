@@ -201,6 +201,7 @@ export function subscribeToJobEvents(
   const maxWaitSeconds = 20
   const requestTimeoutMs = 35_000 // client-side timeout: slightly above server's max-wait-time
   const maxConsecutiveErrors = 5
+  const LATENCY_META_PREFIX = '__latency_meta__:'
 
   console.log('[events] Subscribing to:', eventsUrl)
 
@@ -223,10 +224,39 @@ export function subscribeToJobEvents(
    *  - ivcap.job.status (job status change)
    *  - ivcap.job.result (job result available)
    */
-  const parseIvcapEnvelope = (envelope: Record<string, unknown>): JobEvent | null => {
+  const parseLatencyMeta = (
+    stepId: string,
+    rawMessage: string,
+  ): { message: string; latencyMeta?: Record<string, unknown> } => {
+    const msg = (rawMessage || '').trim()
+    if (!msg) return { message: '' }
+
+    // Marker format: "__latency_meta__:{...json...}" (emitted by backend markers)
+    if (msg.startsWith(LATENCY_META_PREFIX)) {
+      const jsonPart = msg.slice(LATENCY_META_PREFIX.length).trim()
+      try {
+        const parsed = JSON.parse(jsonPart) as Record<string, unknown>
+        return {
+          message: typeof parsed.label === 'string' ? parsed.label : stepId,
+          latencyMeta: parsed,
+        }
+      } catch {
+        return { message: msg }
+      }
+    }
+
+    return { message: rawMessage }
+  }
+
+  const parseIvcapEnvelope = (
+    envelope: Record<string, unknown>,
+    receivedAt: Date,
+    fallbackSeqId?: string | null,
+  ): JobEvent | null => {
     const ivcapType = envelope.type as string | undefined
     const schema = (envelope.schema as string) || ''
     const timestamp = new Date((envelope.timestamp as string) || Date.now())
+    const seqId = (envelope.SeqID as string) || fallbackSeqId || undefined
 
     if (ivcapType === 'ivcap.job.event') {
       const inner = envelope.data as Record<string, unknown> | null
@@ -236,12 +266,16 @@ export function subscribeToJobEvents(
       const options = inner.options as Record<string, unknown> | null
       const message = (options?.message as string) || ''
       const finished = schema.includes('step.finish')
+      const parsed = parseLatencyMeta(stepId, message)
 
       return {
         step_id: stepId,
-        message: message || (finished ? 'completed' : 'started'),
+        message: parsed.message || (finished ? 'completed' : 'started'),
         finished,
         timestamp,
+        receivedAt,
+        seqId,
+        latencyMeta: parsed.latencyMeta,
         type: getEventType(stepId),
       }
     }
@@ -258,6 +292,8 @@ export function subscribeToJobEvents(
         message: `Job status: ${status}`,
         finished: true,
         timestamp,
+        receivedAt,
+        seqId,
         type: 'workflow',
       }
     }
@@ -269,16 +305,22 @@ export function subscribeToJobEvents(
         message: `Result: ${(inner?.['result-urn'] as string) || 'available'}`,
         finished: true,
         timestamp,
+        receivedAt,
+        seqId,
         type: 'workflow',
       }
     }
 
     // Unknown envelope – fall back to flat parsing
-    return parseFlatEvent(envelope)
+    return parseFlatEvent(envelope, receivedAt, seqId)
   }
 
   /** Fallback: try to interpret a record without the IVCAP envelope wrapper. */
-  const parseFlatEvent = (record: Record<string, unknown>): JobEvent | null => {
+  const parseFlatEvent = (
+    record: Record<string, unknown>,
+    receivedAt: Date,
+    fallbackSeqId?: string,
+  ): JobEvent | null => {
     const stepId = (record.step_id as string)
       || (record.stepId as string)
       || (record['step-id'] as string)
@@ -287,12 +329,20 @@ export function subscribeToJobEvents(
     const message = (record.message as string)
       || (record.msg as string)
       || JSON.stringify(record)
+    const parsed = parseLatencyMeta(stepId, message)
+    const seqId = (record.SeqID as string)
+      || (record.seq_id as string)
+      || (record['seq-id'] as string)
+      || fallbackSeqId
 
     return {
       step_id: stepId,
-      message,
+      message: parsed.message,
       finished: (record.finished as boolean) ?? false,
       timestamp: new Date((record.timestamp as string) || Date.now()),
+      receivedAt,
+      seqId,
+      latencyMeta: parsed.latencyMeta,
       type: getEventType(stepId),
     }
   }
@@ -309,8 +359,9 @@ export function subscribeToJobEvents(
       const parsed = JSON.parse(trimmed) as Record<string, unknown>
       const seqId = parsed.SeqID as string
       if (seqId) lastSeqId = seqId
+      const receivedAt = new Date()
 
-      const event = parseIvcapEnvelope(parsed)
+      const event = parseIvcapEnvelope(parsed, receivedAt, seqId || null)
       if (event) onEvent(event)
     } catch (err) {
       console.warn('[events] Failed to parse event JSON:', err, trimmed.slice(0, 200))
@@ -322,10 +373,14 @@ export function subscribeToJobEvents(
     if (!block.trim()) return
 
     const dataLines: string[] = []
+    let blockSeqId: string | null = null
     for (const line of block.split('\n')) {
       if (line.startsWith('id:')) {
         const sseId = line.slice(3).trim()
-        if (sseId) lastSeqId = sseId
+        if (sseId) {
+          lastSeqId = sseId
+          blockSeqId = sseId
+        }
       } else if (line.startsWith('data:')) {
         dataLines.push(line.slice(5).trimStart())
       }
@@ -333,7 +388,18 @@ export function subscribeToJobEvents(
     }
 
     if (dataLines.length > 0) {
-      processDataLine(dataLines.join('\n'))
+      // If payload is flat and lacks SeqID we still preserve SSE id.
+      const joined = dataLines.join('\n')
+      try {
+        const parsed = JSON.parse(joined) as Record<string, unknown>
+        const seqId = (parsed.SeqID as string) || blockSeqId || undefined
+        if (seqId) lastSeqId = seqId
+        const receivedAt = new Date()
+        const event = parseIvcapEnvelope(parsed, receivedAt, seqId || null)
+        if (event) onEvent(event)
+      } catch {
+        processDataLine(joined)
+      }
     }
   }
 
@@ -451,7 +517,7 @@ export function subscribeToJobEvents(
               const rec = item as Record<string, unknown>
               const seqId = rec.SeqID as string
               if (seqId) lastSeqId = seqId
-              const event = parseIvcapEnvelope(rec)
+              const event = parseIvcapEnvelope(rec, new Date(), seqId || null)
               if (event) onEvent(event)
             }
           } catch {

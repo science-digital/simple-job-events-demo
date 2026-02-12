@@ -36,7 +36,14 @@ export interface JobEvent {
   step_id: string
   message: string
   finished: boolean
+  /** Server-side event timestamp from IVCAP envelope */
   timestamp: Date
+  /** Local client timestamp when this event was parsed/received */
+  receivedAt: Date
+  /** Sequence ID from IVCAP envelope/SSE id when available */
+  seqId?: string
+  /** Optional parsed latency marker payload attached to this event */
+  latencyMeta?: Record<string, unknown>
   type: EventType
 }
 

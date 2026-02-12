@@ -28,6 +28,37 @@ export interface UseChatJobEventsReturn {
   firstEventAt: Date | null
   firstTokenAt: Date | null
   finishedAt: Date | null
+  jobCreatedAt: Date | null
+  eventsSubscribeStartedAt: Date | null
+  eventsConnectedAt: Date | null
+  firstTokenServerEventAt: Date | null
+  firstTokenServerEmitAt: Date | null
+  requestDispatchAt: Date | null
+  upstreamAcceptedAt: Date | null
+  firstUpstreamDeltaAt: Date | null
+  firstBatchEmitAt: Date | null
+  latencyBreakdown: ChatLatencyBreakdown
+}
+
+export interface ChatLatencyBreakdown {
+  submitToJobCreateMs: number | null
+  jobCreateToEventsSubscribeMs: number | null
+  jobCreateToEventsConnectedMs: number | null
+  submitToFirstEventMs: number | null
+  submitToFirstTokenMs: number | null
+  firstEventToFirstTokenMs: number | null
+  firstTokenToCompleteMs: number | null
+  serverStepEmitToEventEnvelopeMs: number | null
+  eventEnvelopeToClientReceiveMs: number | null
+  serverStepEmitToClientReceiveMs: number | null
+  modelProxyTtftMs: number | null
+  serverBufferFlushDelayMs: number | null
+  jobEventsPipelineDelayMs: number | null
+}
+
+function diffMs(from: Date | null, to: Date | null): number | null {
+  if (!from || !to) return null
+  return Math.max(0, to.getTime() - from.getTime())
 }
 
 function getMessageText(message: UIMessage): string {
@@ -77,13 +108,27 @@ export function useChatJobEvents(): UseChatJobEventsReturn {
   const [firstEventAt, setFirstEventAt] = useState<Date | null>(null)
   const [firstTokenAt, setFirstTokenAt] = useState<Date | null>(null)
   const [finishedAt, setFinishedAt] = useState<Date | null>(null)
+  const [jobCreatedAt, setJobCreatedAt] = useState<Date | null>(null)
+  const [eventsSubscribeStartedAt, setEventsSubscribeStartedAt] = useState<Date | null>(null)
+  const [eventsConnectedAt, setEventsConnectedAt] = useState<Date | null>(null)
+  const [firstTokenServerEventAt, setFirstTokenServerEventAt] = useState<Date | null>(null)
+  const [firstTokenServerEmitAt, setFirstTokenServerEmitAt] = useState<Date | null>(null)
+  const [requestDispatchAt, setRequestDispatchAt] = useState<Date | null>(null)
+  const [upstreamAcceptedAt, setUpstreamAcceptedAt] = useState<Date | null>(null)
+  const [firstUpstreamDeltaAt, setFirstUpstreamDeltaAt] = useState<Date | null>(null)
+  const [firstBatchEmitAt, setFirstBatchEmitAt] = useState<Date | null>(null)
 
   const assistantIdRef = useRef<string | null>(null)
   const abortRef = useRef<(() => void) | null>(null)
   const pollRef = useRef<number | null>(null)
-  const connectedRef = useRef(false)
   const firstEventRecordedRef = useRef(false)
   const firstTokenRecordedRef = useRef(false)
+  const firstTokenServerEventRecordedRef = useRef(false)
+  const firstServerEmitRecordedRef = useRef(false)
+  const requestDispatchRecordedRef = useRef(false)
+  const upstreamAcceptedRecordedRef = useRef(false)
+  const firstUpstreamDeltaRecordedRef = useRef(false)
+  const firstBatchEmitRecordedRef = useRef(false)
 
   // -- Adaptive typewriter animation -----------------------------------------
   // Batched tokens arrive as large chunks. Instead of dumping them all at once
@@ -193,7 +238,6 @@ export function useChatJobEvents(): UseChatJobEventsReturn {
       window.clearInterval(pollRef.current)
       pollRef.current = null
     }
-    connectedRef.current = false
   }, [stopTypewriter])
 
   const finalizeAssistant = useCallback(() => {
@@ -235,8 +279,27 @@ export function useChatJobEvents(): UseChatJobEventsReturn {
     setFirstEventAt(null)
     setFirstTokenAt(null)
     setFinishedAt(null)
+    setJobCreatedAt(null)
+    setEventsSubscribeStartedAt(null)
+    setEventsConnectedAt(null)
+    setFirstTokenServerEventAt(null)
+    setFirstTokenServerEmitAt(null)
+    setRequestDispatchAt(null)
+    setUpstreamAcceptedAt(null)
+    setFirstUpstreamDeltaAt(null)
+    setFirstBatchEmitAt(null)
     firstEventRecordedRef.current = false
     firstTokenRecordedRef.current = false
+    firstTokenServerEventRecordedRef.current = false
+    firstServerEmitRecordedRef.current = false
+    requestDispatchRecordedRef.current = false
+    upstreamAcceptedRecordedRef.current = false
+    firstUpstreamDeltaRecordedRef.current = false
+    firstBatchEmitRecordedRef.current = false
+    requestDispatchRecordedRef.current = false
+    upstreamAcceptedRecordedRef.current = false
+    firstUpstreamDeltaRecordedRef.current = false
+    firstBatchEmitRecordedRef.current = false
 
     const userMessage = buildUserMessage(trimmed)
     const assistantId = generateId()
@@ -250,6 +313,96 @@ export function useChatJobEvents(): UseChatJobEventsReturn {
     try {
       const createdJobId = await createChatJob(chatMessages)
       setJobId(createdJobId)
+      setJobCreatedAt(new Date())
+      setEventsConnectionStatus('querying')
+      setEventsSubscribeStartedAt(new Date())
+
+      // Start event subscription immediately after job creation to remove
+      // client-side startup delay caused by waiting for status polling.
+      abortRef.current = subscribeToJobEvents(
+        createdJobId,
+        event => {
+          setEvents(prev => [...prev, event])
+
+          // Record first event arrival time (any event type)
+          if (!firstEventRecordedRef.current) {
+            firstEventRecordedRef.current = true
+            setFirstEventAt(new Date())
+          }
+
+          if (event.step_id === 'chat:latency:request-dispatch' && !requestDispatchRecordedRef.current) {
+            const emitMs = Number(event.latencyMeta?.server_emit_ts_ms)
+            if (Number.isFinite(emitMs) && emitMs > 0) {
+              requestDispatchRecordedRef.current = true
+              setRequestDispatchAt(new Date(emitMs))
+            }
+          }
+
+          if (event.step_id === 'chat:latency:upstream-accepted' && !upstreamAcceptedRecordedRef.current) {
+            const emitMs = Number(event.latencyMeta?.server_emit_ts_ms)
+            if (Number.isFinite(emitMs) && emitMs > 0) {
+              upstreamAcceptedRecordedRef.current = true
+              setUpstreamAcceptedAt(new Date(emitMs))
+            }
+          }
+
+          if (event.step_id === 'chat:latency:first-upstream-delta' && !firstUpstreamDeltaRecordedRef.current) {
+            const emitMs = Number(event.latencyMeta?.server_emit_ts_ms)
+            if (Number.isFinite(emitMs) && emitMs > 0) {
+              firstUpstreamDeltaRecordedRef.current = true
+              setFirstUpstreamDeltaAt(new Date(emitMs))
+            }
+          }
+
+          if (event.step_id === 'chat:latency:first-batch' && !firstBatchEmitRecordedRef.current) {
+            const emitMs = Number(event.latencyMeta?.server_emit_ts_ms)
+            if (Number.isFinite(emitMs) && emitMs > 0) {
+              firstBatchEmitRecordedRef.current = true
+              firstServerEmitRecordedRef.current = true
+              const emitDate = new Date(emitMs)
+              setFirstBatchEmitAt(emitDate)
+              setFirstTokenServerEmitAt(new Date(emitMs))
+            }
+          }
+
+          if (isChatTokenEvent(event) && !event.finished) {
+            const token = getChatTokenText(event)
+            if (token) {
+              if (!firstTokenServerEventRecordedRef.current) {
+                firstTokenServerEventRecordedRef.current = true
+                setFirstTokenServerEventAt(event.timestamp)
+              }
+              // Record first token arrival time
+              if (!firstTokenRecordedRef.current) {
+                firstTokenRecordedRef.current = true
+                setFirstTokenAt(new Date())
+              }
+              setTokenEvents(prev => prev + 1)
+              enqueueTypewriterText(token)
+            }
+          }
+
+          // Update status message from non-token chat:* events (start events only)
+          if (
+            event.step_id.startsWith('chat:')
+            && !isChatTokenEvent(event)
+            && !event.finished
+            && event.message
+          ) {
+            setStatusMessage(event.message)
+          }
+        },
+        () => {
+          setEventsConnectedAt(prev => prev ?? new Date())
+          setEventsConnectionStatus('connected')
+        },
+        streamError => {
+          setEventsConnectionStatus('error')
+          setError(streamError.message)
+          setStatus('error')
+          finalizeAssistant()
+        }
+      )
 
       const terminalSuccess = new Set(['success', 'complete', 'succeeded'])
       const terminalError = new Set(['error', 'failed'])
@@ -259,55 +412,9 @@ export function useChatJobEvents(): UseChatJobEventsReturn {
         const job = await readJob(createdJobId)
         const normalized = String(job.status || '').toLowerCase()
 
-        if ((normalized === 'running' || normalized === 'executing') && !connectedRef.current) {
-          connectedRef.current = true
+        if ((normalized === 'running' || normalized === 'executing')) {
           setStatus('streaming')
           setExecutingAt(prev => prev ?? new Date())
-          setEventsConnectionStatus('querying')
-          abortRef.current = subscribeToJobEvents(
-            createdJobId,
-            event => {
-              setEvents(prev => [...prev, event])
-
-              // Record first event arrival time (any event type)
-              if (!firstEventRecordedRef.current) {
-                firstEventRecordedRef.current = true
-                setFirstEventAt(new Date())
-              }
-
-              if (isChatTokenEvent(event) && !event.finished) {
-                const token = getChatTokenText(event)
-                if (token) {
-                  // Record first token arrival time
-                  if (!firstTokenRecordedRef.current) {
-                    firstTokenRecordedRef.current = true
-                    setFirstTokenAt(new Date())
-                  }
-                  setTokenEvents(prev => prev + 1)
-                  enqueueTypewriterText(token)
-                }
-              }
-
-              // Update status message from non-token chat:* events (start events only)
-              if (
-                event.step_id.startsWith('chat:') &&
-                !isChatTokenEvent(event) &&
-                !event.finished &&
-                event.message
-              ) {
-                setStatusMessage(event.message)
-              }
-            },
-            () => {
-              setEventsConnectionStatus('connected')
-            },
-            streamError => {
-              setEventsConnectionStatus('error')
-              setError(streamError.message)
-              setStatus('error')
-              finalizeAssistant()
-            }
-          )
         }
 
         if (terminalSuccess.has(normalized)) {
@@ -342,7 +449,7 @@ export function useChatJobEvents(): UseChatJobEventsReturn {
           cleanup()
           finalizeAssistant()
         })
-      }, 2000)
+      }, 750)
     } catch (submitError) {
       cleanup()
       finalizeAssistant()
@@ -358,6 +465,8 @@ export function useChatJobEvents(): UseChatJobEventsReturn {
     assistantIdRef.current = null
     firstEventRecordedRef.current = false
     firstTokenRecordedRef.current = false
+    firstTokenServerEventRecordedRef.current = false
+    firstServerEmitRecordedRef.current = false
     setMessages([])
     setStatus('idle')
     setJobId(null)
@@ -371,10 +480,47 @@ export function useChatJobEvents(): UseChatJobEventsReturn {
     setFirstEventAt(null)
     setFirstTokenAt(null)
     setFinishedAt(null)
+    setJobCreatedAt(null)
+    setEventsSubscribeStartedAt(null)
+    setEventsConnectedAt(null)
+    setFirstTokenServerEventAt(null)
+    setFirstTokenServerEmitAt(null)
+    setRequestDispatchAt(null)
+    setUpstreamAcceptedAt(null)
+    setFirstUpstreamDeltaAt(null)
+    setFirstBatchEmitAt(null)
   }, [cleanup, setMessages])
 
   const isBusy = useMemo(() => status === 'submitting' || status === 'streaming', [status])
   const isStreaming = useMemo(() => isBusy && tokenEvents > 0, [isBusy, tokenEvents])
+  const latencyBreakdown = useMemo<ChatLatencyBreakdown>(() => ({
+    submitToJobCreateMs: diffMs(submittedAt, jobCreatedAt),
+    jobCreateToEventsSubscribeMs: diffMs(jobCreatedAt, eventsSubscribeStartedAt),
+    jobCreateToEventsConnectedMs: diffMs(jobCreatedAt, eventsConnectedAt),
+    submitToFirstEventMs: diffMs(submittedAt, firstEventAt),
+    submitToFirstTokenMs: diffMs(submittedAt, firstTokenAt),
+    firstEventToFirstTokenMs: diffMs(firstEventAt, firstTokenAt),
+    firstTokenToCompleteMs: diffMs(firstTokenAt, finishedAt),
+    serverStepEmitToEventEnvelopeMs: diffMs(firstTokenServerEmitAt, firstTokenServerEventAt),
+    eventEnvelopeToClientReceiveMs: diffMs(firstTokenServerEventAt, firstTokenAt),
+    serverStepEmitToClientReceiveMs: diffMs(firstTokenServerEmitAt, firstTokenAt),
+    modelProxyTtftMs: diffMs(requestDispatchAt, firstUpstreamDeltaAt),
+    serverBufferFlushDelayMs: diffMs(firstUpstreamDeltaAt, firstBatchEmitAt),
+    jobEventsPipelineDelayMs: diffMs(firstBatchEmitAt, firstTokenServerEventAt),
+  }), [
+    submittedAt,
+    jobCreatedAt,
+    eventsSubscribeStartedAt,
+    eventsConnectedAt,
+    firstEventAt,
+    firstTokenAt,
+    finishedAt,
+    firstTokenServerEventAt,
+    firstTokenServerEmitAt,
+    requestDispatchAt,
+    firstUpstreamDeltaAt,
+    firstBatchEmitAt,
+  ])
 
   return {
     messages,
@@ -394,5 +540,15 @@ export function useChatJobEvents(): UseChatJobEventsReturn {
     firstEventAt,
     firstTokenAt,
     finishedAt,
+    jobCreatedAt,
+    eventsSubscribeStartedAt,
+    eventsConnectedAt,
+    firstTokenServerEventAt,
+    firstTokenServerEmitAt,
+    requestDispatchAt,
+    upstreamAcceptedAt,
+    firstUpstreamDeltaAt,
+    firstBatchEmitAt,
+    latencyBreakdown,
   }
 }

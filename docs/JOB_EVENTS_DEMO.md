@@ -99,14 +99,25 @@ The chat tool emits steps so existing event consumers can reuse the current pars
 3. `chat:tokens:{n}` for each **batched** group of streamed chunks
 4. `chat:complete` once final aggregation is complete
 
+Optional latency marker steps may also appear for instrumentation:
+
+- `chat:latency:request-dispatch`
+- `chat:latency:upstream-accepted`
+- `chat:latency:first-upstream-delta`
+- `chat:latency:first-batch`
+
 #### Token Batching
 
 LLM tokens are accumulated in a server-side buffer and flushed as a single
 `chat:tokens:{batch_num}` event (note the plural **tokens**) when either
 threshold is reached:
 
-- **Time**: 300 ms since the last flush.
-- **Count**: 20 accumulated token chunks.
+- **First batch (UX mode)**:
+  - **Time**: 100 ms since the last flush.
+  - **Count**: 3 accumulated token chunks.
+- **Subsequent batches (throughput mode)**:
+  - **Time**: 300 ms since the last flush.
+  - **Count**: 20 accumulated token chunks.
 - **Stream end**: any remaining buffered tokens are flushed before `chat:complete`.
 
 Each batch event carries the concatenated text of all tokens in the batch as
@@ -182,11 +193,18 @@ The chat page demonstrates end-to-end streaming UX:
 3. While waiting for the job to start, a **"Thinking..." indicator** is shown with real-time status messages from backend events (e.g., "Submitting chat request to model 'gpt-5-mini'").
 4. Once token batches start arriving, a **typewriter animation** reveals text character-by-character (~40 chars/sec) into the assistant bubble with a **blinking cursor**, similar to ChatGPT.
 5. A **timing metrics bar** above the input displays latency deltas: Submit-to-Executing, Submit-to-First-Event, Submit-to-First-Token, Submit-to-Complete.
-6. A collapsible **debug panel** shows raw job events and diagnostics.
+   It also shows transport-focused segments such as Submit-to-Job-Created,
+   Job-Created-to-Events-Connected, Event-Envelope-to-Client, and Emit-to-Client.
+6. A collapsible **debug panel** shows raw job events, targeted bottleneck metrics
+   (ModelProxyTTFT, ServerBufferFlushDelay, JobEventsPipelineDelay), and a
+   likely-bottleneck summary heuristic.
+7. The debug panel includes an **AI Diagnostic Log** block with a copy button
+   for pasting structured run diagnostics into AI tools.
 
 The SSE event subscription includes **retry with exponential backoff** to handle transient network errors (HTTP/2 resets, proxy timeouts).
 
 See `client/README.md` for full details, setup instructions, and hook API reference.
+For metric definitions in plain language, see `docs/LATENCY_METRICS.md`.
 
 The client communicates via the IVCAP Jobs API:
 
