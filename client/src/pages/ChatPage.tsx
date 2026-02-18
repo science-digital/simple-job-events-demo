@@ -5,6 +5,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { EventStream } from '@/components/EventStream'
 import { useChatJobEvents } from '@/hooks/useChatJobEvents'
+import { useWarmUp } from '@/hooks/useWarmUp'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -200,6 +201,8 @@ export function ChatPage() {
     latencyBreakdown,
   } = useChatJobEvents()
 
+  const warmUp = useWarmUp()
+
   const canSubmit = prompt.trim().length > 0 && !isBusy
   const showThinking = isBusy && !isStreaming
 
@@ -357,6 +360,53 @@ export function ChatPage() {
           </Badge>
         </div>
         <div className="flex items-center gap-2">
+          {/* Warm-up button and status */}
+          {warmUp.status === 'idle' && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-xs"
+              onClick={() => void warmUp.warmUp()}
+            >
+              Warm Up
+            </Button>
+          )}
+          {warmUp.status === 'warming' && (
+            <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+              <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              Warming...
+              {warmUp.submitToExecuteMs != null && (
+                <span className="font-mono tabular-nums">{formatMs(warmUp.submitToExecuteMs)}</span>
+              )}
+            </span>
+          )}
+          {warmUp.status === 'warm' && (
+            <span className="inline-flex items-center gap-1.5 text-xs">
+              <Badge variant="secondary" className="text-[10px]">WARM</Badge>
+              {warmUp.submitToCompleteMs != null && (
+                <span className="font-mono tabular-nums text-muted-foreground">
+                  {formatMs(warmUp.submitToCompleteMs)}
+                </span>
+              )}
+            </span>
+          )}
+          {warmUp.status === 'error' && (
+            <span className="inline-flex items-center gap-1.5 text-xs">
+              <Badge variant="destructive" className="text-[10px]">WARM ERR</Badge>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-6 px-2 text-[10px]"
+                onClick={() => void warmUp.warmUp()}
+              >
+                Retry
+              </Button>
+            </span>
+          )}
+
           <Button
             variant="ghost"
             size="sm"

@@ -1,3 +1,5 @@
+import time
+
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, Literal
 
@@ -31,6 +33,10 @@ class Request(BaseModel):
     jschema: str = Field(
         "urn:sd:schema.workflow-simulator.request.1", alias="$schema")
     # Input values.
+    mode: Optional[Literal["workflow", "chat", "warm"]] = Field(
+        default=None,
+        description="Action mode: 'workflow' runs a preset, 'chat' runs LLM streaming, 'warm' is a no-op to prime the service",
+    )
     preset_name: Optional[str] = Field(
         default=None,
         description="Name of the workflow preset to run (e.g., 'deep_research', 'multi_agent_crew', 'simple_pipeline', 'timer_tick')"
@@ -62,10 +68,16 @@ class Request(BaseModel):
 
     # An example showing how to supply the input data.
     model_config = ConfigDict(json_schema_extra={
-        "example": {
-            "$schema": "urn:sd:schema.workflow-simulator.request.1",
-            "preset_name": "deep_research"
-        }
+        "examples": [
+            {
+                "$schema": "urn:sd:schema.workflow-simulator.request.1",
+                "preset_name": "deep_research"
+            },
+            {
+                "$schema": "urn:sd:schema.workflow-simulator.request.1",
+                "mode": "warm"
+            },
+        ]
     })
 
 
@@ -180,14 +192,39 @@ def run_workflow_simulation(req: Request, jobCtxt: JobContext) -> Result:
     by emitting IVCAP events at realistic intervals. Useful for frontend
     development and UX testing against realistic event streams.
 
-    Available presets:
+    Available modes (via the ``mode`` parameter):
+    - warm: No-op that returns immediately; used to prime the lambda container.
+    - chat: Streams a chat completion via LiteLLM (also auto-detected from
+      ``$schema`` or the presence of ``messages``).
+    - workflow (default): Runs a preset simulation.
+
+    Available presets (workflow mode):
     - deep_research: Multi-phase research workflow (Search, Analyze, Synthesize)
     - multi_agent_crew: CrewAI-style with multiple specialized agents
     - simple_pipeline: Basic 3-step sequential workflow for baseline testing
     - timer_tick: Simple timer that emits one event per tick interval
     """
+    # ------------------------------------------------------------------
+    # Warm mode – no-op to prime the service container
+    # ------------------------------------------------------------------
+    if req.mode == "warm":
+        t0 = time.monotonic()
+        logger.info("Warm-up request received; returning immediately")
+        with jobCtxt.report.step("warm:ready", message="Service is warm"):
+            pass
+        elapsed = time.monotonic() - t0
+        return Result(
+            message="Service warm-up complete",
+            total_events=1,
+            elapsed_seconds=round(elapsed, 4),
+        )
+
+    # ------------------------------------------------------------------
+    # Chat mode – explicit mode or auto-detected from schema / messages
+    # ------------------------------------------------------------------
     is_chat_request = (
-        req.jschema == "urn:sd:schema.workflow-simulator.chat.request.1"
+        req.mode == "chat"
+        or req.jschema == "urn:sd:schema.workflow-simulator.chat.request.1"
         or bool(req.messages)
     )
 
@@ -222,6 +259,9 @@ def run_workflow_simulation(req: Request, jobCtxt: JobContext) -> Result:
             elapsed_seconds=round(result.elapsed_seconds, 2),
         )
 
+    # ------------------------------------------------------------------
+    # Workflow mode
+    # ------------------------------------------------------------------
     if not req.preset_name:
         raise ValueError(
             "preset_name is required for workflow mode; for chat mode provide "

@@ -5,12 +5,22 @@
 /** Available workflow presets */
 export type PresetName = 'deep_research' | 'multi_agent_crew' | 'simple_pipeline' | 'timer_tick'
 
+/** Action mode for the service */
+export type JobMode = 'workflow' | 'chat' | 'warm'
+
 /** Request payload for creating a job */
 export interface JobRequest {
   $schema: string
+  mode?: JobMode
   preset_name: PresetName
   total_run_time_seconds?: number
   tick_interval_seconds?: number
+}
+
+/** Request payload for a warm-up (no-op) job */
+export interface WarmJobRequest {
+  $schema: string
+  mode: 'warm'
 }
 
 export type ChatRole = 'system' | 'user' | 'assistant'

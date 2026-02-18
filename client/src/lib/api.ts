@@ -4,7 +4,7 @@
  * Handles job creation and event streaming via the IVCAP Jobs API.
  */
 
-import type { ChatJobRequest, ChatMessage, JobRequest, JobEvent, PresetName } from '@/types/events'
+import type { ChatJobRequest, ChatMessage, JobRequest, JobEvent, PresetName, WarmJobRequest } from '@/types/events'
 import { getEventType } from '@/types/events'
 
 /** IVCAP API base URL from environment */
@@ -120,6 +120,39 @@ export async function createChatJob(
   const jobId = result.id || result['job-id'] || result.job_id
   if (!jobId) {
     throw new Error('Chat job creation response missing job ID')
+  }
+  return jobId
+}
+
+/**
+ * Create a warm-up (no-op) job to prime the lambda service container.
+ *
+ * @returns Job ID for tracking the warm-up lifecycle
+ */
+export async function createWarmJob(): Promise<string> {
+  const parameters: WarmJobRequest = {
+    $schema: REQUEST_SCHEMA,
+    mode: 'warm',
+  }
+
+  const response = await fetch(`${API_URL}/1/services2/${encodeURIComponent(SERVICE_URN)}/jobs`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(AUTH_TOKEN && { 'Authorization': `Bearer ${AUTH_TOKEN}` }),
+    },
+    body: JSON.stringify(parameters),
+  })
+
+  if (!response.ok) {
+    const errorText = await response.text()
+    throw new Error(`Warm-up job creation failed: ${response.status} - ${errorText}`)
+  }
+
+  const result = await response.json()
+  const jobId = result.id || result['job-id'] || result.job_id
+  if (!jobId) {
+    throw new Error('Warm-up job creation response missing job ID')
   }
   return jobId
 }
