@@ -145,6 +145,108 @@ The chat debug panel emits a copyable log that includes:
 - **Retries/backoff**: transient errors can increase connection-related metrics.
 - **Polling artifacts**: executing status timing depends on client poll interval.
 
+## Direct LiteLLM mode
+
+The chat page includes a "Direct LiteLLM" mode that calls the LiteLLM proxy
+directly from the browser, bypassing the IVCAP Jobs pipeline entirely. This
+provides a baseline for isolating how much latency the IVCAP pipeline adds
+versus the model/proxy itself.
+
+### How it works
+
+```
+Browser  ──POST /v1/chat/completions (stream:true)──>  LiteLLM Proxy  ──>  Model
+Browser  <──────────── OpenAI SSE stream ────────────  LiteLLM Proxy  <──  Model
+```
+
+1. User sends a message (or clicks an example prompt).
+2. Client sends `POST {VITE_LITELLM_PROXY}/v1/chat/completions` with
+   `stream: true` and `Authorization: Bearer {VITE_AUTH_TOKEN}`.
+3. LiteLLM proxies the request to the upstream model provider.
+4. The model streams back OpenAI-format SSE chunks:
+   `data: {"choices":[{"delta":{"content":"Hello"}}]}`
+5. Client reads the response body incrementally via `ReadableStream`,
+   parses each SSE block, and feeds content deltas into the typewriter
+   animation (same adaptive algorithm as IVCAP mode).
+6. Stream ends with `data: [DONE]`.
+
+In development, requests are routed through a Vite dev-server proxy
+(`/litellm-direct -> VITE_LITELLM_PROXY`) to avoid CORS. In production,
+the browser calls the proxy URL directly.
+
+### Direct mode metrics
+
+All timestamps are client-clock only (no server-side markers or envelope
+timestamps needed).
+
+- **Submit -> Response Headers**  
+  Time from pressing Send until the HTTP response headers arrive from the proxy.
+  This captures network round-trip and any proxy-level queuing before the SSE
+  stream starts.
+
+- **Submit -> First Token**  
+  Time from pressing Send until the first SSE chunk with content is parsed.
+  In direct mode this is effectively model TTFT plus browser-to-proxy network
+  latency.
+
+- **Submit -> Complete**  
+  Total round-trip from pressing Send until the SSE stream ends (`data: [DONE]`).
+
+- **First Token -> Complete**  
+  Streaming duration: how long the model takes to produce the full response
+  after the first token.
+
+- **Tokens / Throughput**  
+  Number of SSE chunks containing content, and tokens-per-second over the
+  streaming window.
+
+### Is "First Token" measuring the same thing in both modes?
+
+Both modes record `firstTokenAt = new Date()` at the moment the client first
+sees text content. So both answer the UX question: "how long does the user
+wait before seeing the first word?" But the underlying triggers differ:
+
+| | IVCAP mode | Direct mode |
+|---|---|---|
+| Trigger | First `chat:tokens:*` JobEvent with non-empty text | First OpenAI SSE chunk where `choices[0].delta.content` is truthy |
+| Granularity | **Batched** group of tokens (server buffers ~100 ms or 3 chunks before flushing the first batch) | **Individual** SSE delta chunk from the model |
+| Includes batching delay | Yes (first-batch buffer adds ~100 ms+) | No |
+| Includes IVCAP pipeline | Yes (job creation, scheduling, container startup, JobEvents delivery) | No |
+
+**Implication:** Direct "Submit -> First Token" is a tighter lower bound on
+raw model TTFT. The IVCAP version adds batching delay and pipeline overhead
+on top of the same model latency.
+
+For the closest apples-to-apples comparison within IVCAP mode, use the
+backend marker `ModelProxyTTFT` (`first_upstream_delta − request_dispatch`),
+which measures the same thing the Direct path measures -- but from the
+server container's perspective rather than the browser.
+
+### Comparing IVCAP vs Direct
+
+Run the **same prompt** through both modes and compare **Submit -> First Token**:
+
+| Scenario | What it tells you |
+|---|---|
+| Direct TTFT ~1 s, IVCAP TTFT ~12 s | IVCAP pipeline adds ~11 s (scheduling, container startup, batching, event delivery) |
+| Direct TTFT ~10 s, IVCAP TTFT ~14 s | Model itself is slow (~10 s); IVCAP only adds ~4 s overhead |
+| Direct TTFT ~10 s, IVCAP TTFT ~12 s | Model is the bottleneck; IVCAP overhead is small |
+
+The direct mode **Submit -> First Token** gives you the floor for what the
+IVCAP path can theoretically achieve. Any delta above that is IVCAP pipeline
+overhead.
+
+### Direct mode diagnostic log
+
+The debug panel diagnostic log in direct mode includes:
+
+- run status and mode indicator
+- token count
+- key timestamps (submitted, response headers, first token, finished)
+- latency breakdown with all values in milliseconds
+- tokens-per-second throughput
+- recent SSE chunk listing with receive timestamps
+
 ## Practical interpretation
 
 If `Submit -> Job Created` is high, investigate create-job API/network/auth path.  

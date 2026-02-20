@@ -5,6 +5,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { EventStream } from '@/components/EventStream'
 import { useChatJobEvents } from '@/hooks/useChatJobEvents'
+import { useDirectLiteLLM } from '@/hooks/useDirectLiteLLM'
 import { useWarmUp } from '@/hooks/useWarmUp'
 
 // ---------------------------------------------------------------------------
@@ -37,6 +38,8 @@ const EXAMPLE_PROMPTS = [
   },
 ]
 
+type ChatMode = 'ivcap' | 'direct'
+
 // ---------------------------------------------------------------------------
 // Timing helpers
 // ---------------------------------------------------------------------------
@@ -52,6 +55,11 @@ function formatMs(value: number | null): string | null {
   if (value > 0 && value < 1) return '<1ms'
   if (value < 1000) return `${Math.round(value)}ms`
   return `${(value / 1000).toFixed(2)}s`
+}
+
+function formatTps(value: number | null): string | null {
+  if (value == null) return null
+  return `${value.toFixed(1)} tok/s`
 }
 
 function isoOrNA(date: Date | null): string {
@@ -162,46 +170,78 @@ function SourceLegend() {
 }
 
 // ---------------------------------------------------------------------------
+// Mode toggle (segmented button)
+// ---------------------------------------------------------------------------
+
+function ModeToggle({
+  mode,
+  onChange,
+  disabled,
+}: {
+  mode: ChatMode
+  onChange: (mode: ChatMode) => void
+  disabled?: boolean
+}) {
+  return (
+    <div className="inline-flex items-center rounded-lg border bg-muted/30 p-0.5">
+      <button
+        type="button"
+        disabled={disabled}
+        className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors ${
+          mode === 'ivcap'
+            ? 'bg-background text-foreground shadow-sm'
+            : 'text-muted-foreground hover:text-foreground'
+        } disabled:cursor-not-allowed disabled:opacity-50`}
+        onClick={() => onChange('ivcap')}
+      >
+        IVCAP Job
+      </button>
+      <button
+        type="button"
+        disabled={disabled}
+        className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors ${
+          mode === 'direct'
+            ? 'bg-background text-foreground shadow-sm'
+            : 'text-muted-foreground hover:text-foreground'
+        } disabled:cursor-not-allowed disabled:opacity-50`}
+        onClick={() => onChange('direct')}
+      >
+        Direct LiteLLM
+      </button>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Chat page
 // ---------------------------------------------------------------------------
 
 export function ChatPage() {
   const [prompt, setPrompt] = useState('')
+  const [chatMode, setChatMode] = useState<ChatMode>('ivcap')
   const [debugOpen, setDebugOpen] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
+  const ivcap = useChatJobEvents()
+  const direct = useDirectLiteLLM()
+
+  const warmUp = useWarmUp()
+
+  // Shared fields from the active backend
+  const active = chatMode === 'ivcap' ? ivcap : direct
   const {
     messages,
     submitPrompt,
-    reset,
+    reset: resetBackend,
     isBusy,
     isStreaming,
     status,
-    jobId,
     error,
-    tokenEvents,
-    eventsConnectionStatus,
-    events,
-    statusMessage,
     submittedAt,
-    executingAt,
-    firstEventAt,
     firstTokenAt,
     finishedAt,
-    jobCreatedAt,
-    eventsSubscribeStartedAt,
-    eventsConnectedAt,
-    firstTokenServerEventAt,
-    firstTokenServerEmitAt,
-    requestDispatchAt,
-    upstreamAcceptedAt,
-    firstUpstreamDeltaAt,
-    firstBatchEmitAt,
-    latencyBreakdown,
-  } = useChatJobEvents()
-
-  const warmUp = useWarmUp()
+  } = active
 
   const canSubmit = prompt.trim().length > 0 && !isBusy
   const showThinking = isBusy && !isStreaming
@@ -212,8 +252,10 @@ export function ChatPage() {
   )
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'error'>('idle')
 
-  const diagnosticLog = useMemo(() => {
-    const recentEvents = events.slice(-40)
+  // ---- Diagnostic log (IVCAP mode) ----
+  const ivcapDiagnosticLog = useMemo(() => {
+    if (chatMode !== 'ivcap') return ''
+    const recentEvents = ivcap.events.slice(-40)
     const recentEventLines = recentEvents.map((event, index) => {
       const seq = event.seqId ? ` seq=${event.seqId}` : ''
       const meta = event.latencyMeta ? ` meta=${JSON.stringify(event.latencyMeta)}` : ''
@@ -225,67 +267,84 @@ export function ChatPage() {
       '# IVCAP Chat Latency Diagnostic Log',
       '',
       '## Run',
-      `status=${status}`,
-      `job_id=${jobId ?? 'n/a'}`,
-      `events_connection_status=${eventsConnectionStatus}`,
-      `token_events=${tokenEvents}`,
+      `status=${ivcap.status}`,
+      `job_id=${ivcap.jobId ?? 'n/a'}`,
+      `events_connection_status=${ivcap.eventsConnectionStatus}`,
+      `token_events=${ivcap.tokenEvents}`,
       '',
       '## Timestamps',
-      `submitted_at=${isoOrNA(submittedAt)}`,
-      `job_created_at=${isoOrNA(jobCreatedAt)}`,
-      `events_subscribe_started_at=${isoOrNA(eventsSubscribeStartedAt)}`,
-      `events_connected_at=${isoOrNA(eventsConnectedAt)}`,
-      `executing_at=${isoOrNA(executingAt)}`,
-      `first_event_at=${isoOrNA(firstEventAt)}`,
-      `first_token_server_emit_at=${isoOrNA(firstTokenServerEmitAt)}`,
-      `request_dispatch_at=${isoOrNA(requestDispatchAt)}`,
-      `upstream_accepted_at=${isoOrNA(upstreamAcceptedAt)}`,
-      `first_upstream_delta_at=${isoOrNA(firstUpstreamDeltaAt)}`,
-      `first_batch_emit_at=${isoOrNA(firstBatchEmitAt)}`,
-      `first_token_server_event_at=${isoOrNA(firstTokenServerEventAt)}`,
-      `first_token_client_received_at=${isoOrNA(firstTokenAt)}`,
-      `finished_at=${isoOrNA(finishedAt)}`,
+      `submitted_at=${isoOrNA(ivcap.submittedAt)}`,
+      `job_created_at=${isoOrNA(ivcap.jobCreatedAt)}`,
+      `events_subscribe_started_at=${isoOrNA(ivcap.eventsSubscribeStartedAt)}`,
+      `events_connected_at=${isoOrNA(ivcap.eventsConnectedAt)}`,
+      `executing_at=${isoOrNA(ivcap.executingAt)}`,
+      `first_event_at=${isoOrNA(ivcap.firstEventAt)}`,
+      `first_token_server_emit_at=${isoOrNA(ivcap.firstTokenServerEmitAt)}`,
+      `request_dispatch_at=${isoOrNA(ivcap.requestDispatchAt)}`,
+      `upstream_accepted_at=${isoOrNA(ivcap.upstreamAcceptedAt)}`,
+      `first_upstream_delta_at=${isoOrNA(ivcap.firstUpstreamDeltaAt)}`,
+      `first_batch_emit_at=${isoOrNA(ivcap.firstBatchEmitAt)}`,
+      `first_token_server_event_at=${isoOrNA(ivcap.firstTokenServerEventAt)}`,
+      `first_token_client_received_at=${isoOrNA(ivcap.firstTokenAt)}`,
+      `finished_at=${isoOrNA(ivcap.finishedAt)}`,
       '',
       '## Latency Breakdown (ms)',
-      `submit_to_job_create_ms=${latencyBreakdown.submitToJobCreateMs ?? 'n/a'} source=client`,
-      `job_create_to_events_subscribe_ms=${latencyBreakdown.jobCreateToEventsSubscribeMs ?? 'n/a'} source=client`,
-      `job_create_to_events_connected_ms=${latencyBreakdown.jobCreateToEventsConnectedMs ?? 'n/a'} source=client`,
-      `submit_to_first_event_ms=${latencyBreakdown.submitToFirstEventMs ?? 'n/a'} source=client`,
-      `submit_to_first_token_ms=${latencyBreakdown.submitToFirstTokenMs ?? 'n/a'} source=client`,
-      `first_event_to_first_token_ms=${latencyBreakdown.firstEventToFirstTokenMs ?? 'n/a'} source=client`,
-      `first_token_to_complete_ms=${latencyBreakdown.firstTokenToCompleteMs ?? 'n/a'} source=client`,
-      `server_step_emit_to_event_envelope_ms=${latencyBreakdown.serverStepEmitToEventEnvelopeMs ?? 'n/a'} source=mixed`,
-      `event_envelope_to_client_receive_ms=${latencyBreakdown.eventEnvelopeToClientReceiveMs ?? 'n/a'} source=mixed`,
-      `server_step_emit_to_client_receive_ms=${latencyBreakdown.serverStepEmitToClientReceiveMs ?? 'n/a'} source=backend_marker`,
-      `model_proxy_ttft_ms=${latencyBreakdown.modelProxyTtftMs ?? 'n/a'} source=backend_marker`,
-      `server_buffer_flush_delay_ms=${latencyBreakdown.serverBufferFlushDelayMs ?? 'n/a'} source=backend_marker`,
-      `jobevents_pipeline_delay_ms=${latencyBreakdown.jobEventsPipelineDelayMs ?? 'n/a'} source=mixed`,
+      `submit_to_job_create_ms=${ivcap.latencyBreakdown.submitToJobCreateMs ?? 'n/a'} source=client`,
+      `job_create_to_events_subscribe_ms=${ivcap.latencyBreakdown.jobCreateToEventsSubscribeMs ?? 'n/a'} source=client`,
+      `job_create_to_events_connected_ms=${ivcap.latencyBreakdown.jobCreateToEventsConnectedMs ?? 'n/a'} source=client`,
+      `submit_to_first_event_ms=${ivcap.latencyBreakdown.submitToFirstEventMs ?? 'n/a'} source=client`,
+      `submit_to_first_token_ms=${ivcap.latencyBreakdown.submitToFirstTokenMs ?? 'n/a'} source=client`,
+      `first_event_to_first_token_ms=${ivcap.latencyBreakdown.firstEventToFirstTokenMs ?? 'n/a'} source=client`,
+      `first_token_to_complete_ms=${ivcap.latencyBreakdown.firstTokenToCompleteMs ?? 'n/a'} source=client`,
+      `server_step_emit_to_event_envelope_ms=${ivcap.latencyBreakdown.serverStepEmitToEventEnvelopeMs ?? 'n/a'} source=mixed`,
+      `event_envelope_to_client_receive_ms=${ivcap.latencyBreakdown.eventEnvelopeToClientReceiveMs ?? 'n/a'} source=mixed`,
+      `server_step_emit_to_client_receive_ms=${ivcap.latencyBreakdown.serverStepEmitToClientReceiveMs ?? 'n/a'} source=backend_marker`,
+      `model_proxy_ttft_ms=${ivcap.latencyBreakdown.modelProxyTtftMs ?? 'n/a'} source=backend_marker`,
+      `server_buffer_flush_delay_ms=${ivcap.latencyBreakdown.serverBufferFlushDelayMs ?? 'n/a'} source=backend_marker`,
+      `jobevents_pipeline_delay_ms=${ivcap.latencyBreakdown.jobEventsPipelineDelayMs ?? 'n/a'} source=mixed`,
       '',
       '## Recent Events (up to last 40)',
       ...(recentEventLines.length ? recentEventLines : ['n/a']),
     ].join('\n')
-  }, [
-    events,
-    status,
-    jobId,
-    eventsConnectionStatus,
-    tokenEvents,
-    submittedAt,
-    jobCreatedAt,
-    eventsSubscribeStartedAt,
-    eventsConnectedAt,
-    executingAt,
-    firstEventAt,
-    firstTokenServerEmitAt,
-    requestDispatchAt,
-    upstreamAcceptedAt,
-    firstUpstreamDeltaAt,
-    firstBatchEmitAt,
-    firstTokenServerEventAt,
-    firstTokenAt,
-    finishedAt,
-    latencyBreakdown,
-  ])
+  }, [chatMode, ivcap])
+
+  // ---- Diagnostic log (Direct mode) ----
+  const directDiagnosticLog = useMemo(() => {
+    if (chatMode !== 'direct') return ''
+    const lb = direct.latencyBreakdown
+    const recentChunks = direct.sseChunks.slice(-40)
+    const chunkLines = recentChunks.map((chunk, i) => {
+      const content = chunk.content.replace(/\s+/g, ' ').slice(0, 80)
+      return `${i + 1}. [${chunk.receivedAt.toISOString()}] "${content}"`
+    })
+
+    return [
+      '# Direct LiteLLM Latency Diagnostic Log',
+      '',
+      '## Run',
+      `status=${direct.status}`,
+      `mode=direct`,
+      `token_count=${lb.tokenCount}`,
+      '',
+      '## Timestamps',
+      `submitted_at=${isoOrNA(direct.submittedAt)}`,
+      `response_headers_at=${isoOrNA(direct.responseHeadersAt)}`,
+      `first_token_at=${isoOrNA(direct.firstTokenAt)}`,
+      `finished_at=${isoOrNA(direct.finishedAt)}`,
+      '',
+      '## Latency Breakdown (ms)',
+      `submit_to_response_headers_ms=${lb.submitToResponseHeadersMs ?? 'n/a'} source=client`,
+      `submit_to_first_token_ms=${lb.submitToFirstTokenMs ?? 'n/a'} source=client`,
+      `submit_to_complete_ms=${lb.submitToCompleteMs ?? 'n/a'} source=client`,
+      `first_token_to_complete_ms=${lb.firstTokenToCompleteMs ?? 'n/a'} source=client`,
+      `tokens_per_second=${lb.tokensPerSecond?.toFixed(1) ?? 'n/a'}`,
+      '',
+      '## Recent SSE Chunks (up to last 40)',
+      ...(chunkLines.length ? chunkLines : ['n/a']),
+    ].join('\n')
+  }, [chatMode, direct])
+
+  const diagnosticLog = chatMode === 'ivcap' ? ivcapDiagnosticLog : directDiagnosticLog
 
   const handleCopyDiagnosticLog = useCallback(async () => {
     try {
@@ -308,7 +367,6 @@ export function ChatPage() {
     const el = textareaRef.current
     if (!el) return
     el.style.height = 'auto'
-    // Cap at ~4 lines (roughly 6rem)
     el.style.height = `${Math.min(el.scrollHeight, 96)}px`
   }, [])
 
@@ -333,6 +391,20 @@ export function ChatPage() {
     }
   }
 
+  // ---- Reset handler: reset both backends and allow mode switch ----
+  const handleReset = useCallback(() => {
+    ivcap.reset()
+    direct.reset()
+  }, [ivcap, direct])
+
+  // ---- Mode switch resets both backends ----
+  const handleModeChange = useCallback((newMode: ChatMode) => {
+    if (newMode === chatMode) return
+    ivcap.reset()
+    direct.reset()
+    setChatMode(newMode)
+  }, [chatMode, ivcap, direct])
+
   // ---- Status badge variant ----
   const statusBadgeVariant = (() => {
     switch (status) {
@@ -347,6 +419,9 @@ export function ChatPage() {
     }
   })()
 
+  // ---- Status message (IVCAP has statusMessage; direct does not) ----
+  const statusMessage = chatMode === 'ivcap' ? ivcap.statusMessage : null
+
   return (
     <div className="flex h-screen flex-col bg-background">
       {/* ----------------------------------------------------------------- */}
@@ -354,57 +429,65 @@ export function ChatPage() {
       {/* ----------------------------------------------------------------- */}
       <header className="flex shrink-0 items-center justify-between border-b px-4 py-2">
         <div className="flex items-center gap-3">
-          <h1 className="text-lg font-semibold tracking-tight">IVCAP Chat</h1>
+          <h1 className="text-lg font-semibold tracking-tight">
+            {chatMode === 'ivcap' ? 'IVCAP Chat' : 'Direct LiteLLM'}
+          </h1>
           <Badge variant={statusBadgeVariant} className="text-xs">
             {status.toUpperCase()}
           </Badge>
         </div>
         <div className="flex items-center gap-2">
-          {/* Warm-up button and status */}
-          {warmUp.status === 'idle' && (
-            <Button
-              variant="outline"
-              size="sm"
-              className="text-xs"
-              onClick={() => void warmUp.warmUp()}
-            >
-              Warm Up
-            </Button>
-          )}
-          {warmUp.status === 'warming' && (
-            <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-              <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-              </svg>
-              Warming...
-              {warmUp.submitToExecuteMs != null && (
-                <span className="font-mono tabular-nums">{formatMs(warmUp.submitToExecuteMs)}</span>
+          <ModeToggle mode={chatMode} onChange={handleModeChange} disabled={isBusy} />
+
+          {/* Warm-up button (IVCAP mode only) */}
+          {chatMode === 'ivcap' && (
+            <>
+              {warmUp.status === 'idle' && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="text-xs"
+                  onClick={() => void warmUp.warmUp()}
+                >
+                  Warm Up
+                </Button>
               )}
-            </span>
-          )}
-          {warmUp.status === 'warm' && (
-            <span className="inline-flex items-center gap-1.5 text-xs">
-              <Badge variant="secondary" className="text-[10px]">WARM</Badge>
-              {warmUp.submitToCompleteMs != null && (
-                <span className="font-mono tabular-nums text-muted-foreground">
-                  {formatMs(warmUp.submitToCompleteMs)}
+              {warmUp.status === 'warming' && (
+                <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  Warming...
+                  {warmUp.submitToExecuteMs != null && (
+                    <span className="font-mono tabular-nums">{formatMs(warmUp.submitToExecuteMs)}</span>
+                  )}
                 </span>
               )}
-            </span>
-          )}
-          {warmUp.status === 'error' && (
-            <span className="inline-flex items-center gap-1.5 text-xs">
-              <Badge variant="destructive" className="text-[10px]">WARM ERR</Badge>
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-6 px-2 text-[10px]"
-                onClick={() => void warmUp.warmUp()}
-              >
-                Retry
-              </Button>
-            </span>
+              {warmUp.status === 'warm' && (
+                <span className="inline-flex items-center gap-1.5 text-xs">
+                  <Badge variant="secondary" className="text-[10px]">WARM</Badge>
+                  {warmUp.submitToCompleteMs != null && (
+                    <span className="font-mono tabular-nums text-muted-foreground">
+                      {formatMs(warmUp.submitToCompleteMs)}
+                    </span>
+                  )}
+                </span>
+              )}
+              {warmUp.status === 'error' && (
+                <span className="inline-flex items-center gap-1.5 text-xs">
+                  <Badge variant="destructive" className="text-[10px]">WARM ERR</Badge>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-6 px-2 text-[10px]"
+                    onClick={() => void warmUp.warmUp()}
+                  >
+                    Retry
+                  </Button>
+                </span>
+              )}
+            </>
           )}
 
           <Button
@@ -415,7 +498,7 @@ export function ChatPage() {
           >
             {debugOpen ? 'Hide Debug' : 'Debug'}
           </Button>
-          <Button variant="ghost" size="sm" onClick={reset} disabled={isBusy && !messages.length}>
+          <Button variant="ghost" size="sm" onClick={handleReset} disabled={isBusy && !messages.length}>
             Reset
           </Button>
           <Button asChild variant="ghost" size="sm">
@@ -450,7 +533,9 @@ export function ChatPage() {
                   </svg>
                   <p className="text-sm">Send a message to start a conversation.</p>
                   <p className="text-xs opacity-60">
-                    Each message creates an IVCAP job; tokens stream back via Job Events.
+                    {chatMode === 'ivcap'
+                      ? 'Each message creates an IVCAP job; tokens stream back via Job Events.'
+                      : 'Messages are sent directly to LiteLLM proxy; tokens stream back via OpenAI SSE.'}
                   </p>
                   <div className="mt-4 flex flex-wrap justify-center gap-2">
                     {EXAMPLE_PROMPTS.map(example => (
@@ -485,10 +570,8 @@ export function ChatPage() {
                           : 'bg-muted/60'
                       }`}
                     >
-                      {/* Message text */}
                       <div className="whitespace-pre-wrap">
                         {text}
-                        {/* Blinking cursor while streaming */}
                         {isLastAssistant && isStreaming && (
                           <span
                             className="ml-0.5 inline-block h-[1.1em] w-[2px] translate-y-[2px] bg-current"
@@ -497,7 +580,6 @@ export function ChatPage() {
                         )}
                       </div>
 
-                      {/* Thinking indicator: show on the last assistant bubble if no tokens yet */}
                       {isLastAssistant && showThinking && !text && (
                         <ThinkingIndicator statusMessage={statusMessage} />
                       )}
@@ -522,26 +604,39 @@ export function ChatPage() {
           {/* Input bar                                                        */}
           {/* --------------------------------------------------------------- */}
           <div className="shrink-0 border-t bg-background px-4 py-3">
-            {/* Timing metrics bar -- visible when a job has been submitted */}
-            {status !== 'idle' && submittedAt && (
+            {/* Timing metrics bar -- IVCAP mode */}
+            {chatMode === 'ivcap' && status !== 'idle' && ivcap.submittedAt && (
               <>
                 <div className="mx-auto mb-1.5 flex max-w-2xl flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
-                  <TimingPill label="Executing" value={formatDelta(submittedAt, executingAt)} source="client" />
-                  <TimingPill label="First event" value={formatDelta(submittedAt, firstEventAt)} source="client" />
-                  <TimingPill label="First token" value={formatDelta(submittedAt, firstTokenAt)} source="client" />
-                  <TimingPill label="Complete" value={formatDelta(submittedAt, finishedAt)} source="client" />
+                  <TimingPill label="Executing" value={formatDelta(ivcap.submittedAt, ivcap.executingAt)} source="client" />
+                  <TimingPill label="First event" value={formatDelta(ivcap.submittedAt, ivcap.firstEventAt)} source="client" />
+                  <TimingPill label="First token" value={formatDelta(ivcap.submittedAt, ivcap.firstTokenAt)} source="client" />
+                  <TimingPill label="Complete" value={formatDelta(ivcap.submittedAt, ivcap.finishedAt)} source="client" />
                 </div>
                 <div className="mx-auto mb-2.5 flex max-w-2xl flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground/85">
-                  <TimingPill label="Create job" value={formatMs(latencyBreakdown.submitToJobCreateMs)} source="client" />
-                  <TimingPill label="Connect events" value={formatMs(latencyBreakdown.jobCreateToEventsConnectedMs)} source="client" />
-                  <TimingPill label="Events platform->client" value={formatMs(latencyBreakdown.eventEnvelopeToClientReceiveMs)} source="mixed" />
-                  <TimingPill label="Emit->client" value={formatMs(latencyBreakdown.serverStepEmitToClientReceiveMs)} source="marker" />
+                  <TimingPill label="Create job" value={formatMs(ivcap.latencyBreakdown.submitToJobCreateMs)} source="client" />
+                  <TimingPill label="Connect events" value={formatMs(ivcap.latencyBreakdown.jobCreateToEventsConnectedMs)} source="client" />
+                  <TimingPill label="Events platform->client" value={formatMs(ivcap.latencyBreakdown.eventEnvelopeToClientReceiveMs)} source="mixed" />
+                  <TimingPill label="Emit->client" value={formatMs(ivcap.latencyBreakdown.serverStepEmitToClientReceiveMs)} source="marker" />
                 </div>
                 <div className="mx-auto mb-2.5 max-w-2xl">
                   <SourceLegend />
                 </div>
               </>
             )}
+
+            {/* Timing metrics bar -- Direct mode */}
+            {chatMode === 'direct' && status !== 'idle' && direct.submittedAt && (
+              <div className="mx-auto mb-2.5 flex max-w-2xl flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                <TimingPill label="Response headers" value={formatMs(direct.latencyBreakdown.submitToResponseHeadersMs)} source="client" />
+                <TimingPill label="First token" value={formatMs(direct.latencyBreakdown.submitToFirstTokenMs)} source="client" />
+                <TimingPill label="Complete" value={formatMs(direct.latencyBreakdown.submitToCompleteMs)} source="client" />
+                <TimingPill label="Streaming" value={formatMs(direct.latencyBreakdown.firstTokenToCompleteMs)} source="client" />
+                <TimingPill label="Throughput" value={formatTps(direct.latencyBreakdown.tokensPerSecond)} />
+                <TimingPill label="Tokens" value={String(direct.latencyBreakdown.tokenCount)} />
+              </div>
+            )}
+
             <form
               className="mx-auto flex max-w-2xl items-end gap-2"
               onSubmit={handleSubmit}
@@ -563,7 +658,6 @@ export function ChatPage() {
                 className="mb-px rounded-xl px-4"
               >
                 {isBusy ? (
-                  /* Simple spinner */
                   <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
                     <circle
                       className="opacity-25"
@@ -580,7 +674,6 @@ export function ChatPage() {
                     />
                   </svg>
                 ) : (
-                  /* Arrow-up send icon */
                   <svg
                     xmlns="http://www.w3.org/2000/svg"
                     className="h-4 w-4"
@@ -597,7 +690,9 @@ export function ChatPage() {
               </Button>
             </form>
             <p className="mx-auto mt-1.5 max-w-2xl text-center text-[11px] text-muted-foreground/50">
-              Messages are routed via IVCAP Job Events. Latency depends on job scheduling + event delivery.
+              {chatMode === 'ivcap'
+                ? 'Messages are routed via IVCAP Job Events. Latency depends on job scheduling + event delivery.'
+                : 'Messages are sent directly to LiteLLM proxy. Latency is pure model/proxy + network.'}
             </p>
           </div>
         </div>
@@ -610,107 +705,169 @@ export function ChatPage() {
             {/* Diagnostics */}
             <div className="shrink-0 border-b px-4 py-3">
               <h2 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Job Diagnostics
+                {chatMode === 'ivcap' ? 'Job Diagnostics' : 'Direct Diagnostics'}
               </h2>
-              <div className="space-y-2 text-xs">
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Status</span>
-                  <Badge variant={statusBadgeVariant} className="text-[10px]">
-                    {status.toUpperCase()}
-                  </Badge>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Job ID</span>
-                  <span className="max-w-[180px] truncate font-mono text-[10px]">
-                    {jobId || '--'}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Token Events</span>
-                  <span className="font-mono">{tokenEvents}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Events Stream</span>
-                  <span>{eventsConnectionStatus}</span>
-                </div>
-                <div className="pt-2">
-                  <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    Latency Breakdown
+
+              {/* ---- IVCAP debug diagnostics ---- */}
+              {chatMode === 'ivcap' && (
+                <div className="space-y-2 text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Status</span>
+                    <Badge variant={statusBadgeVariant} className="text-[10px]">
+                      {ivcap.status.toUpperCase()}
+                    </Badge>
                   </div>
-                  <SourceLegend />
-                  <div className="space-y-1 font-mono text-[10px]">
-                    <div className="mt-1 flex justify-between">
-                      <span title="How long from pressing Send until we get a job ID back.">Submit to job created (C)</span>
-                      <span>{formatMs(latencyBreakdown.submitToJobCreateMs) ?? '--'}</span>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Job ID</span>
+                    <span className="max-w-[180px] truncate font-mono text-[10px]">
+                      {ivcap.jobId || '--'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Token Events</span>
+                    <span className="font-mono">{ivcap.tokenEvents}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Events Stream</span>
+                    <span>{ivcap.eventsConnectionStatus}</span>
+                  </div>
+                  <div className="pt-2">
+                    <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      Latency Breakdown
                     </div>
-                    <div className="flex justify-between">
-                      <span title="How long between getting a job ID and starting event listening.">Job created to subscribe (C)</span>
-                      <span>{formatMs(latencyBreakdown.jobCreateToEventsSubscribeMs) ?? '--'}</span>
+                    <SourceLegend />
+                    <div className="space-y-1 font-mono text-[10px]">
+                      <div className="mt-1 flex justify-between">
+                        <span title="How long from pressing Send until we get a job ID back.">Submit to job created (C)</span>
+                        <span>{formatMs(ivcap.latencyBreakdown.submitToJobCreateMs) ?? '--'}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span title="How long between getting a job ID and starting event listening.">Job created to subscribe (C)</span>
+                        <span>{formatMs(ivcap.latencyBreakdown.jobCreateToEventsSubscribeMs) ?? '--'}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span title="How long from job creation to a successful events connection.">Job created to events connected (C)</span>
+                        <span>{formatMs(ivcap.latencyBreakdown.jobCreateToEventsConnectedMs) ?? '--'}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span title="How long from Send until any first event arrives.">Submit to first event (C)</span>
+                        <span>{formatMs(ivcap.latencyBreakdown.submitToFirstEventMs) ?? '--'}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span title="How long from Send until first answer text arrives.">Submit to first token (C)</span>
+                        <span>{formatMs(ivcap.latencyBreakdown.submitToFirstTokenMs) ?? '--'}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span title="Gap between first event and first answer text. Usually model startup + buffering.">First event to first token (C)</span>
+                        <span>{formatMs(ivcap.latencyBreakdown.firstEventToFirstTokenMs) ?? '--'}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span title="How long from app saying 'I emitted this' to JobEvents stamping the event on server side.">App emit to JobEvents stamp (M)</span>
+                        <span>{formatMs(ivcap.latencyBreakdown.serverStepEmitToEventEnvelopeMs) ?? '--'}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span title="How long from JobEvents server timestamp to browser receive time.">JobEvents stamp to browser (M)</span>
+                        <span>{formatMs(ivcap.latencyBreakdown.eventEnvelopeToClientReceiveMs) ?? '--'}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span title="End-to-end from app emit marker to browser receive time.">App emit to browser (B)</span>
+                        <span>{formatMs(ivcap.latencyBreakdown.serverStepEmitToClientReceiveMs) ?? '--'}</span>
+                      </div>
+                      <div className="mt-1 flex justify-between">
+                        <span title="Approximate model startup time until first upstream token appears.">Model/proxy first-token time (B)</span>
+                        <span>{formatMs(ivcap.latencyBreakdown.modelProxyTtftMs) ?? '--'}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span title="How long text waits in buffer before first token batch is emitted.">Server first-batch buffering delay (B)</span>
+                        <span>{formatMs(ivcap.latencyBreakdown.serverBufferFlushDelayMs) ?? '--'}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span title="How long first emitted batch takes to appear in JobEvents as a stamped event.">JobEvents pipeline delay (M)</span>
+                        <span>{formatMs(ivcap.latencyBreakdown.jobEventsPipelineDelayMs) ?? '--'}</span>
+                      </div>
                     </div>
-                    <div className="flex justify-between">
-                      <span title="How long from job creation to a successful events connection.">Job created to events connected (C)</span>
-                      <span>{formatMs(latencyBreakdown.jobCreateToEventsConnectedMs) ?? '--'}</span>
+                  </div>
+                  <div className="pt-2">
+                    <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      Raw Timestamps
                     </div>
-                    <div className="flex justify-between">
-                      <span title="How long from Send until any first event arrives.">Submit to first event (C)</span>
-                      <span>{formatMs(latencyBreakdown.submitToFirstEventMs) ?? '--'}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span title="How long from Send until first answer text arrives.">Submit to first token (C)</span>
-                      <span>{formatMs(latencyBreakdown.submitToFirstTokenMs) ?? '--'}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span title="Gap between first event and first answer text. Usually model startup + buffering.">First event to first token (C)</span>
-                      <span>{formatMs(latencyBreakdown.firstEventToFirstTokenMs) ?? '--'}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span title="How long from app saying 'I emitted this' to JobEvents stamping the event on server side.">App emit to JobEvents stamp (M)</span>
-                      <span>{formatMs(latencyBreakdown.serverStepEmitToEventEnvelopeMs) ?? '--'}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span title="How long from JobEvents server timestamp to browser receive time.">JobEvents stamp to browser (M)</span>
-                      <span>{formatMs(latencyBreakdown.eventEnvelopeToClientReceiveMs) ?? '--'}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span title="End-to-end from app emit marker to browser receive time.">App emit to browser (B)</span>
-                      <span>{formatMs(latencyBreakdown.serverStepEmitToClientReceiveMs) ?? '--'}</span>
-                    </div>
-                    <div className="mt-1 flex justify-between">
-                      <span title="Approximate model startup time until first upstream token appears.">Model/proxy first-token time (B)</span>
-                      <span>{formatMs(latencyBreakdown.modelProxyTtftMs) ?? '--'}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span title="How long text waits in buffer before first token batch is emitted.">Server first-batch buffering delay (B)</span>
-                      <span>{formatMs(latencyBreakdown.serverBufferFlushDelayMs) ?? '--'}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span title="How long first emitted batch takes to appear in JobEvents as a stamped event.">JobEvents pipeline delay (M)</span>
-                      <span>{formatMs(latencyBreakdown.jobEventsPipelineDelayMs) ?? '--'}</span>
+                    <div className="space-y-1 font-mono text-[10px]">
+                      <div className="flex justify-between"><span title="Browser time when you pressed Send.">Submitted at</span><span>{ivcap.submittedAt?.toISOString() ?? '--'}</span></div>
+                      <div className="flex justify-between"><span title="Browser time when job ID came back.">Job created at</span><span>{ivcap.jobCreatedAt?.toISOString() ?? '--'}</span></div>
+                      <div className="flex justify-between"><span title="Browser time when event listening started.">Events subscribe started at</span><span>{ivcap.eventsSubscribeStartedAt?.toISOString() ?? '--'}</span></div>
+                      <div className="flex justify-between"><span title="Browser time when events connection first succeeded.">Events connected at</span><span>{ivcap.eventsConnectedAt?.toISOString() ?? '--'}</span></div>
+                      <div className="flex justify-between"><span title="Server app time when first token batch was emitted.">First token server emit at</span><span>{ivcap.firstTokenServerEmitAt?.toISOString() ?? '--'}</span></div>
+                      <div className="flex justify-between"><span title="Server app time when upstream request was sent to the model proxy.">Request dispatch at</span><span>{ivcap.requestDispatchAt?.toISOString() ?? '--'}</span></div>
+                      <div className="flex justify-between"><span title="Server app time when upstream request was accepted.">Upstream accepted at</span><span>{ivcap.upstreamAcceptedAt?.toISOString() ?? '--'}</span></div>
+                      <div className="flex justify-between"><span title="Server app time when first upstream token arrived.">First upstream delta at</span><span>{ivcap.firstUpstreamDeltaAt?.toISOString() ?? '--'}</span></div>
+                      <div className="flex justify-between"><span title="Server app time when first batch was emitted into JobEvents.">First batch emit at</span><span>{ivcap.firstBatchEmitAt?.toISOString() ?? '--'}</span></div>
+                      <div className="flex justify-between"><span title="JobEvents server timestamp on the first token event.">First token event server timestamp</span><span>{ivcap.firstTokenServerEventAt?.toISOString() ?? '--'}</span></div>
+                      <div className="flex justify-between"><span title="Browser time when first token event reached the page.">First token received at</span><span>{ivcap.firstTokenAt?.toISOString() ?? '--'}</span></div>
                     </div>
                   </div>
                 </div>
-                <div className="pt-2">
-                  <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    Raw Timestamps
+              )}
+
+              {/* ---- Direct debug diagnostics ---- */}
+              {chatMode === 'direct' && (
+                <div className="space-y-2 text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Status</span>
+                    <Badge variant={statusBadgeVariant} className="text-[10px]">
+                      {direct.status.toUpperCase()}
+                    </Badge>
                   </div>
-                  <div className="space-y-1 font-mono text-[10px]">
-                    <div className="flex justify-between"><span title="Browser time when you pressed Send.">Submitted at</span><span>{submittedAt?.toISOString() ?? '--'}</span></div>
-                    <div className="flex justify-between"><span title="Browser time when job ID came back.">Job created at</span><span>{jobCreatedAt?.toISOString() ?? '--'}</span></div>
-                    <div className="flex justify-between"><span title="Browser time when event listening started.">Events subscribe started at</span><span>{eventsSubscribeStartedAt?.toISOString() ?? '--'}</span></div>
-                    <div className="flex justify-between"><span title="Browser time when events connection first succeeded.">Events connected at</span><span>{eventsConnectedAt?.toISOString() ?? '--'}</span></div>
-                    <div className="flex justify-between"><span title="Server app time when first token batch was emitted.">First token server emit at</span><span>{firstTokenServerEmitAt?.toISOString() ?? '--'}</span></div>
-                    <div className="flex justify-between"><span title="Server app time when upstream request was sent to the model proxy.">Request dispatch at</span><span>{requestDispatchAt?.toISOString() ?? '--'}</span></div>
-                    <div className="flex justify-between"><span title="Server app time when upstream request was accepted.">Upstream accepted at</span><span>{upstreamAcceptedAt?.toISOString() ?? '--'}</span></div>
-                    <div className="flex justify-between"><span title="Server app time when first upstream token arrived.">First upstream delta at</span><span>{firstUpstreamDeltaAt?.toISOString() ?? '--'}</span></div>
-                    <div className="flex justify-between"><span title="Server app time when first batch was emitted into JobEvents.">First batch emit at</span><span>{firstBatchEmitAt?.toISOString() ?? '--'}</span></div>
-                    <div className="flex justify-between"><span title="JobEvents server timestamp on the first token event.">First token event server timestamp</span><span>{firstTokenServerEventAt?.toISOString() ?? '--'}</span></div>
-                    <div className="flex justify-between"><span title="Browser time when first token event reached the page.">First token received at</span><span>{firstTokenAt?.toISOString() ?? '--'}</span></div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Mode</span>
+                    <span className="font-mono text-[10px]">Direct LiteLLM</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Token Count</span>
+                    <span className="font-mono">{direct.tokenCount}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Throughput</span>
+                    <span className="font-mono">{formatTps(direct.latencyBreakdown.tokensPerSecond) ?? '--'}</span>
+                  </div>
+                  <div className="pt-2">
+                    <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      Latency Breakdown
+                    </div>
+                    <div className="space-y-1 font-mono text-[10px]">
+                      <div className="flex justify-between">
+                        <span title="How long from pressing Send until HTTP response headers arrive.">Submit to response headers (C)</span>
+                        <span>{formatMs(direct.latencyBreakdown.submitToResponseHeadersMs) ?? '--'}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span title="How long from pressing Send until first token content arrives.">Submit to first token (C)</span>
+                        <span>{formatMs(direct.latencyBreakdown.submitToFirstTokenMs) ?? '--'}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span title="Total time from pressing Send until stream ends.">Submit to complete (C)</span>
+                        <span>{formatMs(direct.latencyBreakdown.submitToCompleteMs) ?? '--'}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span title="Streaming duration from first token to stream end.">First token to complete (C)</span>
+                        <span>{formatMs(direct.latencyBreakdown.firstTokenToCompleteMs) ?? '--'}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="pt-2">
+                    <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      Raw Timestamps
+                    </div>
+                    <div className="space-y-1 font-mono text-[10px]">
+                      <div className="flex justify-between"><span title="Browser time when you pressed Send.">Submitted at</span><span>{direct.submittedAt?.toISOString() ?? '--'}</span></div>
+                      <div className="flex justify-between"><span title="Browser time when HTTP response headers arrived.">Response headers at</span><span>{direct.responseHeadersAt?.toISOString() ?? '--'}</span></div>
+                      <div className="flex justify-between"><span title="Browser time when first token content was parsed.">First token at</span><span>{direct.firstTokenAt?.toISOString() ?? '--'}</span></div>
+                      <div className="flex justify-between"><span title="Browser time when SSE stream ended.">Finished at</span><span>{direct.finishedAt?.toISOString() ?? '--'}</span></div>
+                    </div>
                   </div>
                 </div>
-              </div>
+              )}
             </div>
 
-            {/* Raw events */}
+            {/* Raw events / SSE chunks */}
             <div className="min-h-0 flex-1 px-4 py-3">
               <div className="mb-3 rounded-md border bg-muted/20 p-2">
                 <div className="mb-2 flex items-center justify-between">
@@ -736,16 +893,49 @@ export function ChatPage() {
                   className="h-28 w-full resize-none rounded border bg-background px-2 py-1 font-mono text-[10px] text-foreground"
                 />
               </div>
-              <h2 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Raw Job Events
-              </h2>
-              <div className="min-h-0">
-                <EventStream
-                  events={events}
-                  eventsConnectionStatus={eventsConnectionStatus}
-                  className="max-h-none"
-                />
-              </div>
+
+              {chatMode === 'ivcap' && (
+                <>
+                  <h2 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    Raw Job Events
+                  </h2>
+                  <div className="min-h-0">
+                    <EventStream
+                      events={ivcap.events}
+                      eventsConnectionStatus={ivcap.eventsConnectionStatus}
+                      className="max-h-none"
+                    />
+                  </div>
+                </>
+              )}
+
+              {chatMode === 'direct' && (
+                <>
+                  <h2 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    Raw SSE Chunks ({direct.sseChunks.length})
+                  </h2>
+                  <div className="min-h-0 max-h-[60vh] overflow-y-auto rounded-md border bg-muted/10 p-2">
+                    {direct.sseChunks.length === 0 ? (
+                      <p className="py-4 text-center text-xs text-muted-foreground/60">
+                        No SSE chunks received yet.
+                      </p>
+                    ) : (
+                      <div className="space-y-0.5 font-mono text-[10px]">
+                        {direct.sseChunks.map((chunk, i) => (
+                          <div key={i} className="flex gap-2">
+                            <span className="shrink-0 text-muted-foreground/50">
+                              {chunk.receivedAt.toISOString().slice(11, 23)}
+                            </span>
+                            <span className="break-all">
+                              {chunk.content.replace(/\n/g, '\\n')}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
             </div>
           </aside>
         )}

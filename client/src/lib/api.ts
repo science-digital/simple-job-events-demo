@@ -157,6 +157,71 @@ export async function createWarmJob(): Promise<string> {
   return jobId
 }
 
+// ---------------------------------------------------------------------------
+// Direct LiteLLM streaming
+// ---------------------------------------------------------------------------
+
+const LITELLM_PROXY = import.meta.env.VITE_LITELLM_PROXY || ''
+
+/** In dev mode, use the Vite proxy to avoid CORS. In production, hit the proxy directly. */
+const LITELLM_BASE_URL = import.meta.env.DEV && LITELLM_PROXY
+  ? '/litellm-direct'
+  : LITELLM_PROXY
+
+export interface DirectChatOptions {
+  model?: string
+  temperature?: number
+  maxTokens?: number
+  signal?: AbortSignal
+}
+
+/**
+ * Stream a chat completion directly from the LiteLLM proxy (OpenAI-compatible).
+ *
+ * Returns the raw `Response` so the caller can read the SSE body via
+ * `response.body.getReader()`.
+ */
+export async function streamDirectChat(
+  messages: ChatMessage[],
+  options: DirectChatOptions = {},
+): Promise<Response> {
+  if (!LITELLM_BASE_URL) {
+    throw new Error('VITE_LITELLM_PROXY is not configured')
+  }
+  if (!messages.length) {
+    throw new Error('Cannot stream direct chat: messages is empty')
+  }
+
+  const body: Record<string, unknown> = {
+    model: options.model || 'gpt-5-mini',
+    messages,
+    stream: true,
+  }
+  if (Number.isFinite(options.temperature)) {
+    body.temperature = options.temperature
+  }
+  if (Number.isFinite(options.maxTokens)) {
+    body.max_tokens = options.maxTokens
+  }
+
+  const response = await fetch(`${LITELLM_BASE_URL}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(AUTH_TOKEN && { Authorization: `Bearer ${AUTH_TOKEN}` }),
+    },
+    body: JSON.stringify(body),
+    signal: options.signal,
+  })
+
+  if (!response.ok) {
+    const errorText = await response.text()
+    throw new Error(`Direct LiteLLM request failed: ${response.status} - ${errorText}`)
+  }
+
+  return response
+}
+
 export function isChatTokenEvent(event: JobEvent): boolean {
   return event.step_id.startsWith('chat:token:') || event.step_id.startsWith('chat:tokens:')
 }

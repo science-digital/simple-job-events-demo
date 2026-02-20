@@ -211,3 +211,30 @@ The client communicates via the IVCAP Jobs API:
 - `POST /1/services2/{service_urn}/jobs` -- Create job
 - `GET /1/services2/{service_urn}/jobs/{job_id}` -- Poll status
 - `GET /1/services2/{service_urn}/jobs/{job_id}/events` -- SSE long-poll for events
+
+### Direct LiteLLM Mode (`/chat`, toggle)
+
+The chat page includes a **mode toggle** ("IVCAP Job" / "Direct LiteLLM") that
+switches between two request paths for latency comparison:
+
+| | IVCAP Job (default) | Direct LiteLLM |
+|---|---|---|
+| Path | Client -> IVCAP Jobs API -> Container -> LiteLLM -> JobEvents SSE -> Client | Client -> LiteLLM Proxy -> OpenAI SSE -> Client |
+| Protocol | IVCAP Job Events envelopes via SSE long-poll | OpenAI-compatible SSE (`data: {"choices":[...]}`) |
+| Auth | `VITE_AUTH_TOKEN` via IVCAP Jobs API | `VITE_AUTH_TOKEN` as Bearer to LiteLLM directly |
+| Config | `VITE_API_URL`, `VITE_SERVICE_URN` | `VITE_LITELLM_PROXY` |
+
+Direct mode calls `POST {VITE_LITELLM_PROXY}/v1/chat/completions` with
+`stream: true` and reads the SSE body incrementally. In development, a Vite
+proxy rule (`/litellm-direct`) avoids CORS.
+
+The purpose is to establish a **baseline**: by running the same prompt through
+both paths, you can isolate how much of the observed latency is model/proxy
+TTFT versus IVCAP pipeline overhead (job scheduling, container startup,
+batching, event delivery).
+
+Metrics shown in direct mode: Submit-to-Response-Headers, Submit-to-First-Token,
+Submit-to-Complete, First-Token-to-Complete, token throughput (tok/s), and token
+count. The debug panel shows raw SSE chunks with receive timestamps.
+
+For detailed metric definitions and comparison guidance, see `docs/LATENCY_METRICS.md`.

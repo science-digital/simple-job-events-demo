@@ -46,20 +46,23 @@ class ChatSimulator:
 
     @staticmethod
     def _proxy_url() -> str:
-        proxy = os.getenv("LITELLM_PROXY", "").strip() or ChatSimulator.DEFAULT_LITELLM_PROXY
+        proxy = os.getenv("LITELLM_PROXY", "").strip(
+        ) or ChatSimulator.DEFAULT_LITELLM_PROXY
         return proxy.rstrip("/")
 
     def _proxy_bearer_token(self) -> str:
         # Prefer explicit env var for local runs.
         token = os.getenv("IVCAP_JWT", "").strip()
         if token:
-            self.logger.info("Using LiteLLM auth token source: IVCAP_JWT env var")
+            self.logger.info(
+                "Using LiteLLM auth token source: IVCAP_JWT env var")
             return token
 
         # Fall back to runtime-provided job authorization on deployed runs.
         job_auth = (self.job_context.job_authorization or "").strip()
         if job_auth:
-            self.logger.info("Using LiteLLM auth token source: JobContext.job_authorization")
+            self.logger.info(
+                "Using LiteLLM auth token source: JobContext.job_authorization")
             lower = job_auth.lower()
             if lower.startswith("bearer "):
                 return job_auth[7:].strip()
@@ -157,7 +160,8 @@ class ChatSimulator:
         # Background thread for non-blocking event writes.  A single worker
         # preserves event ordering while letting the LLM stream loop continue
         # without waiting for the sidecar HTTP round-trip.
-        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="event-flush")
+        executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="event-flush")
         pending_futures: list[Future] = []
 
         def flush_batch() -> None:
@@ -191,7 +195,8 @@ class ChatSimulator:
                 try:
                     fut.result(timeout=30)
                 except Exception as exc:
-                    self.logger.warning("Background event write failed: %s", exc)
+                    self.logger.warning(
+                        "Background event write failed: %s", exc)
             pending_futures.clear()
 
         try:
@@ -211,7 +216,8 @@ class ChatSimulator:
                 payload["max_tokens"] = max_tokens
 
             endpoint = f"{self._proxy_url()}/v1/chat/completions"
-            self.logger.info("Submitting streaming chat request to %s", endpoint)
+            self.logger.info(
+                "Submitting streaming chat request to %s", endpoint)
             self._emit_latency_marker(
                 "chat:latency:request-dispatch",
                 "Outbound request dispatched to LiteLLM proxy",
@@ -233,8 +239,10 @@ class ChatSimulator:
                                 error_body = "<unavailable>"
                             error_body = (error_body or "").strip()
                             if len(error_body) > 1000:
-                                error_body = error_body[:1000] + "...<truncated>"
-                            call_id = (response.headers.get("x-litellm-call-id") or "").strip()
+                                error_body = error_body[:1000] + \
+                                    "...<truncated>"
+                            call_id = (response.headers.get(
+                                "x-litellm-call-id") or "").strip()
                             call_id_msg = f", call_id={call_id}" if call_id else ""
                             raise ChatSimulationError(
                                 "CHAT_LITELLM_HTTP_ERROR",
@@ -242,7 +250,8 @@ class ChatSimulator:
                                 f"{error_body or '<empty body>'}",
                             )
 
-                        request_step.finished("Chat request accepted by LiteLLM proxy")
+                        request_step.finished(
+                            "Chat request accepted by LiteLLM proxy")
                         self._event_count += 1
                         self._emit_latency_marker(
                             "chat:latency:upstream-accepted",
@@ -268,7 +277,8 @@ class ChatSimulator:
                                 try:
                                     parsed = json.loads(data)
                                 except json.JSONDecodeError:
-                                    self.logger.warning("Skipping non-JSON stream chunk: %s", data[:120])
+                                    self.logger.warning(
+                                        "Skipping non-JSON stream chunk: %s", data[:120])
                                     continue
 
                                 delta = self._extract_delta_content(parsed)
@@ -283,7 +293,8 @@ class ChatSimulator:
                                     )
 
                                 chunks_emitted += 1
-                                approx_tokens_emitted += max(1, len(delta.split()))
+                                approx_tokens_emitted += max(1,
+                                                             len(delta.split()))
                                 response_chunks.append(delta)
 
                                 # Buffer the token and flush when thresholds are met
@@ -308,7 +319,8 @@ class ChatSimulator:
                             # closing the response step.
                             drain_pending()
 
-                            response_step.finished(f"Completed streaming {chunks_emitted} chunks")
+                            response_step.finished(
+                                f"Completed streaming {chunks_emitted} chunks")
                             self._event_count += 1
 
             with self.job_context.report.step("chat:complete", message="Chat response finalized"):
@@ -325,7 +337,8 @@ class ChatSimulator:
                 elapsed_seconds=elapsed,
             )
         except ChatSimulationError as e:
-            self.logger.exception("Chat simulation failed [%s]: %s", e.code, e.public_message)
+            self.logger.exception(
+                "Chat simulation failed [%s]: %s", e.code, e.public_message)
             self._emit_error_event(f"{e.code}: {e.public_message}")
             raise
         except httpx.TimeoutException as e:
