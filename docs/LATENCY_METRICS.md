@@ -247,6 +247,12 @@ The debug panel diagnostic log in direct mode includes:
 - tokens-per-second throughput
 - recent SSE chunk listing with receive timestamps
 
+## Warm-up and cold starts
+
+Container cold starts can dominate `Submit -> Executing` on the first request after a period of inactivity. The warm-up mode (`mode: "warm"`) sends a no-op job that primes the container without running a real chat completion. The chat UI includes a **Warm Up** button, and the benchmark script (`scripts/benchmark-ttft.mjs`) sends a warm-up job by default before collecting measurements (disable with `--no-warmup`).
+
+When interpreting metrics, keep in mind whether the measurement was taken on a cold or warm container.
+
 ## Practical interpretation
 
 If `Submit -> Job Created` is high, investigate create-job API/network/auth path.  

@@ -77,7 +77,9 @@ client/
 │   │   └── EventStream.tsx  # Event display component with auto-scroll
 │   ├── hooks/
 │   │   ├── useWorkflow.ts        # Workflow execution lifecycle
-│   │   └── useChatJobEvents.ts   # Chat state: job creation, SSE events, token streaming
+│   │   ├── useChatJobEvents.ts   # Chat state: job creation, SSE events, token streaming
+│   │   ├── useDirectLiteLLM.ts   # Direct LiteLLM chat (bypasses IVCAP pipeline)
+│   │   └── useWarmUp.ts          # Warm-up job to prime the service container
 │   ├── lib/
 │   │   ├── api.ts           # IVCAP API client (job create, status poll, SSE events)
 │   │   └── utils.ts         # Utility functions (cn helper)
@@ -127,6 +129,8 @@ A ChatGPT-style conversational interface for testing chat latency and UX through
 - **Collapsible debug panel** -- Right-side panel (toggle via "Debug" button) showing job diagnostics (status, job ID, token event count, connection status) and a raw event stream.
 - **Keyboard shortcuts** -- Enter to send, Shift+Enter for newline.
 - **Retry resilience** -- SSE long-poll automatically retries on transient network errors (HTTP/2 resets, timeouts) with exponential backoff up to 5 consecutive failures.
+- **Warm-up button** -- Fires a `mode: "warm"` job to prime the service container, with timing metrics (submit-to-execute, submit-to-complete). Reduces cold-start latency for subsequent chat requests.
+- **Direct LiteLLM toggle** -- Switch between "IVCAP Job" and "Direct LiteLLM" modes to compare latency with and without the IVCAP Jobs pipeline. Direct mode calls `POST {VITE_LITELLM_PROXY}/v1/chat/completions` with `stream: true` and reads SSE deltas incrementally. In development, a Vite proxy rule (`/litellm-direct`) avoids CORS.
 
 **Event flow:**
 
@@ -193,6 +197,44 @@ Manages the full chat lifecycle. Returns:
 ### `useWorkflow`
 
 Manages workflow simulation lifecycle (preset selection, job creation, event subscription, status polling).
+
+### `useDirectLiteLLM`
+
+Manages the direct-to-LiteLLM chat path, bypassing the IVCAP Jobs pipeline. Returns:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `messages` | `UIMessage[]` | Full conversation transcript (AI SDK format) |
+| `submitPrompt` | `(prompt: string) => Promise<void>` | Send a user message directly to LiteLLM |
+| `reset` | `() => void` | Clear conversation and abort any active stream |
+| `isBusy` | `boolean` | True while submitting or streaming |
+| `isStreaming` | `boolean` | True once SSE content deltas are arriving |
+| `status` | `ChatRunStatus` | `'idle' \| 'submitting' \| 'streaming' \| 'success' \| 'error'` |
+| `error` | `string \| null` | Error message if any |
+| `tokenCount` | `number` | Count of SSE chunks with content received |
+| `submittedAt` | `Date \| null` | When the user hit send |
+| `responseHeadersAt` | `Date \| null` | When HTTP response headers arrived from the proxy |
+| `firstTokenAt` | `Date \| null` | When the first content delta was parsed |
+| `finishedAt` | `Date \| null` | When the SSE stream ended |
+| `latencyBreakdown` | `DirectLatencyBreakdown` | Derived latency segments and throughput metrics |
+| `sseChunks` | `DirectSseChunk[]` | Raw SSE chunks with receive timestamps (for debug panel) |
+
+### `useWarmUp`
+
+Fires a no-op warm-up job (`mode: "warm"`) to prime the service container, reducing cold-start latency for subsequent chat requests. Returns:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `warmUp` | `() => Promise<void>` | Fire a warm-up job |
+| `status` | `WarmUpStatus` | `'idle' \| 'warming' \| 'warm' \| 'error'` |
+| `jobId` | `string \| null` | Job ID of the warm-up job |
+| `error` | `string \| null` | Error message if any |
+| `events` | `JobEvent[]` | Events received from the warm-up job |
+| `submittedAt` | `Date \| null` | When the warm-up was submitted |
+| `executingAt` | `Date \| null` | When the job entered executing state |
+| `finishedAt` | `Date \| null` | When the warm-up completed |
+| `submitToExecuteMs` | `number \| null` | Submit to executing delta in ms |
+| `submitToCompleteMs` | `number \| null` | Submit to complete delta in ms |
 
 ## Development
 

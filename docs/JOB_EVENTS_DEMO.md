@@ -9,6 +9,36 @@ The goal is to support a client chat experience that submits a chat job and rend
 
 ## Modes
 
+## 0) Warm-up Mode
+
+A no-op mode that returns immediately, used to prime the service container and eliminate cold-start latency for subsequent requests.
+
+### Input
+
+Send `mode: "warm"` via the primary endpoint (`POST /`):
+
+```json
+{
+  "$schema": "urn:sd:schema.workflow-simulator.request.1",
+  "mode": "warm"
+}
+```
+
+### Output
+
+A single `warm:ready` event is emitted and the response returns immediately:
+
+```json
+{
+  "$schema": "urn:sd:schema.workflow-simulator.1",
+  "message": "Service warm-up complete",
+  "total_events": 1,
+  "elapsed_seconds": 0.001
+}
+```
+
+The client UI includes a **Warm Up** button on the chat page that fires this job before sending chat requests.
+
 ## 1) Workflow Simulation Mode (`/`)
 
 ### Input
@@ -238,3 +268,24 @@ Submit-to-Complete, First-Token-to-Complete, token throughput (tok/s), and token
 count. The debug panel shows raw SSE chunks with receive timestamps.
 
 For detailed metric definitions and comparison guidance, see `docs/LATENCY_METRICS.md`.
+
+## Benchmarking
+
+`scripts/benchmark-ttft.mjs` automates time-to-first-token comparison between IVCAP and Direct LiteLLM modes. It runs N interleaved iterations of each mode, optionally sends a warm-up job first, and collects detailed latency metrics.
+
+```bash
+node scripts/benchmark-ttft.mjs [options]
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--iterations, -n` | Iterations per mode | `10` |
+| `--prompt` | Test prompt text | built-in |
+| `--env` | Path to `.env` file | `client/.env` |
+| `--output, -o` | Output JSON path | `scripts/benchmark-results.json` |
+| `--no-warmup` | Skip warm-up job | warm-up enabled |
+| `--mode` | `direct`, `ivcap`, or `both` | `both` |
+
+The script reads `VITE_API_URL`, `VITE_AUTH_TOKEN`, `VITE_SERVICE_URN`, and `VITE_LITELLM_PROXY` from the specified `.env` file. It also checks JWT expiry before starting.
+
+Results are written to JSON (`scripts/benchmark-results.json`) and summary reports are available in `docs/time-to-first-token-stats-*.md`.

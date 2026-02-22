@@ -185,10 +185,11 @@ the Readme in this repo as the source of your docs.
 
 ## Default Functionality:
 
-This service demonstrates two event-driven patterns over IVCAP Job Events:
+This service demonstrates three modes over IVCAP Job Events:
 
-- Workflow simulation with realistic multi-agent step events.
-- Chatbot streaming via LiteLLM with incremental `chat:token:*` events.
+- **Workflow simulation** with realistic multi-agent step events.
+- **Chatbot streaming** via LiteLLM with incremental `chat:tokens:*` events.
+- **Warm-up** -- a no-op mode that primes the service container for faster subsequent requests.
 
 |            | Description |
 | ---------- | ----------- |
@@ -196,6 +197,8 @@ This service demonstrates two event-driven patterns over IVCAP Job Events:
 | **Workflow Output (`POST /`)** | Workflow summary stats plus emitted Job Events |
 | **Chat Input (`POST /chat`)** | `messages[]`, optional `model`, optional generation settings |
 | **Chat Output (`POST /chat`)** | Aggregated chat text, chunk/token counts, elapsed time, plus streamed `chat:*` Job Events |
+| **Warm-up Input (`POST /`)** | `mode: "warm"` |
+| **Warm-up Output (`POST /`)** | Immediate success response with a single `warm:ready` event |
 
 Available workflow presets: `deep_research`, `multi_agent_crew`, `simple_pipeline`, `timer_tick`
 
@@ -206,9 +209,11 @@ To select chat mode via Jobs API, send:
 - `$schema: urn:sd:schema.workflow-simulator.chat.request.1` (recommended), and
 - `messages[]`
 
+To send a warm-up request, send `mode: "warm"`.
+
 Chat mode requires:
 
-- `LITELLM_PROXY` (backend): LiteLLM proxy base URL.
+- `LITELLM_PROXY` (backend): LiteLLM proxy base URL (defaults to `https://mindweaver.develop.ivcap.io/litellm`).
 - Backend -> LiteLLM auth token:
   - Deployed jobs: taken automatically from `JobContext.job_authorization`.
   - Local runs: set `IVCAP_JWT` manually.
@@ -218,7 +223,35 @@ When running locally, set `IVCAP_JWT` explicitly if your environment does not in
 
 See [docs/JOB_EVENTS_DEMO.md](docs/JOB_EVENTS_DEMO.md) for full details.
 
-Optional demo UI: `client/` contains a small React app which creates a job via the IVCAP Jobs API and (best-effort) fetches the job's events for display. See `client/README.md`.
+### Demo UI
+
+`client/` contains a React app with two routes:
+
+- **`/`** -- Workflow simulation demo with real-time event streaming.
+- **`/chat`** -- ChatGPT-style chat interface with two request paths:
+  - **IVCAP Job** (default): routes through the full IVCAP Jobs pipeline.
+  - **Direct LiteLLM**: calls the LiteLLM proxy directly from the browser, bypassing the Jobs pipeline. Useful as a latency baseline.
+
+The chat page also includes a **Warm Up** button to prime the service container before sending chat requests. See `client/README.md`.
+
+### Benchmarking
+
+`scripts/benchmark-ttft.mjs` compares time-to-first-token between IVCAP and Direct LiteLLM modes by running interleaved iterations and collecting detailed latency metrics.
+
+```
+$ node scripts/benchmark-ttft.mjs [options]
+```
+
+| Option | Description | Default |
+| ------ | ----------- | ------- |
+| `--iterations, -n` | Iterations per mode | `10` |
+| `--prompt` | Test prompt text | built-in |
+| `--env` | Path to `.env` file | `client/.env` |
+| `--output, -o` | Output JSON path | `scripts/benchmark-results.json` |
+| `--no-warmup` | Skip warm-up job | warm-up enabled |
+| `--mode` | `direct`, `ivcap`, or `both` | `both` |
+
+Benchmark results are saved as JSON and can be found in `scripts/benchmark-results.json`. Summary reports are in `docs/time-to-first-token-stats-*.md`.
 
 ## Local Testing:
 
